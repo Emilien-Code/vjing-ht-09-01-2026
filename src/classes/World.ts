@@ -31,6 +31,9 @@ export default class World extends EventEmitter {
     onBPMBeat() {
 
     }
+    randomizeScene() {
+
+    }
     onMouseMove(e: Event) { }
     onMouseDown(e: Event) { }
     onMouseUp(e: Event) { }

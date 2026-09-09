@@ -51,8 +51,32 @@ export default class Experience {
 
         this.createAudioManagers()
         this.setupExportGUI()
+        this.setupKeyboardControls()
 
 
+    }
+
+    private setupKeyboardControls() {
+        window.addEventListener('keydown', (e: KeyboardEvent) => {
+            if (e.repeat) return
+            const target = e.target as HTMLElement | null
+            if (target && ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)) return
+
+            if (e.code === 'KeyF') {
+                this.toggleFullscreen()
+            } else if (e.code === 'Space') {
+                e.preventDefault()
+                this.world?.randomizeScene()
+            }
+        })
+    }
+
+    private toggleFullscreen() {
+        if (!document.fullscreenElement) {
+            document.documentElement.requestFullscreen().catch(() => { })
+        } else {
+            document.exitFullscreen().catch(() => { })
+        }
     }
 
     public async createAudioManagers() {

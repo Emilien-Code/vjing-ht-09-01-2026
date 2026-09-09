@@ -234,6 +234,14 @@ export default class GlassScene extends World {
         this.squaresFalling.onReady()
     }
 
+    randomizeScene() {
+        const candidates = SCENE_NAMES
+            .map((_, i) => i)
+            .filter(i => i !== this.currentSceneIndex)
+        const next = candidates[Math.floor(Math.random() * candidates.length)]
+        this.switchScene(next)
+    }
+
     onBPMBeat() {
         // if (!this.exp.audioManager || !this.exp.bpmManager) return
         SCENE_NAMES.forEach(name => {
