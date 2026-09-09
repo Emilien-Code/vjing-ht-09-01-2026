@@ -1,5 +1,4 @@
 import * as THREE from "three"
-import Analyzer from "./sounds/Analyzer.js"
 import Renderer from "./utils/Renderer";
 import Camera from "./utils/Camera";
 import Sizes from "./utils/Sizes";
@@ -28,10 +27,9 @@ export default class Experience {
     public audioManager: AudioManager | undefined
     public bpmManager: BPMManager | undefined
     public isAudioLoaded = false
-    public analyzer: any
     public world: World | null = null; // use the genera Page class type
 
-    constructor(canvas: HTMLCanvasElement, a: any) {
+    constructor(canvas: HTMLCanvasElement) {
 
         this.canvas = canvas;
 
@@ -44,7 +42,6 @@ export default class Experience {
         this.renderer = new Renderer(this);
         this.ressources = new Ressources(sources)
         this.ressources.startLoading()
-        this.analyzer = a
 
 
         this.sizes.on("resize", () => this.resize());
@@ -59,32 +56,27 @@ export default class Experience {
     }
 
     public async createAudioManagers() {
-        this.isAudioLoaded = true
-        this.analyzer.onAudio((a: any) => {
-            if (a.kick > 0.8) {
-
-                this.world.onBPMBeat(a)
-
-            }
+        this.audioManager = new AudioManager()
+        this.bpmManager = new BPMManager()
+        this.bpmManager.addEventListener('beat', () => {
+            this.world && this.world.onBPMBeat()
         })
-        // this.audioManager = new AudioManager()
-        // console.log("start")
-        // await this.audioManager.loadAudioBuffer()
-        // console.log("start")
-        // this.bpmManager = new BPMManager()
-        // this.bpmManager.addEventListener('beat', () => {
-        // this.world && this.world.onBPMBeat()
-        // })
-        // /**
-        //  * double check this.audioManager.audio
-        //  */
-        // await this.bpmManager.detectBPM(this.audioManager.audio.buffer)
-        // this.audioManager.play()
+        this.setupBPMGUI()
+        this.isAudioLoaded = true
 
+        await this.audioManager.connectMic()
+    }
 
-        // console.log("ready")
+    private setupBPMGUI() {
+        const bpmManager = this.bpmManager
+        if (!bpmManager) return
 
+        const state = { bpm: 120, tapTempo: () => bpmManager.tap() }
+        const folder = this.helpers.GUI.addFolder('BPM')
+        folder.add(state, 'bpm', 40, 220, 1).name('BPM').onChange((v: number) => bpmManager.setBPM(v))
+        folder.add(state, 'tapTempo').name('Tap Tempo')
 
+        bpmManager.setBPM(state.bpm)
     }
 
     private setupExportGUI() {
@@ -116,6 +108,9 @@ export default class Experience {
     }
     public update(): void {
         if (this.isReady && this.isAudioLoaded) {
+            const dt = Math.min(this.time.delta * 0.001, 0.1)
+            this.audioManager?.update()
+            this.bpmManager?.update(dt)
             this.camera.update();
             this.renderer.update();
             this.world?.update();
@@ -127,9 +122,4 @@ export default class Experience {
 
 
 
-const a = new Analyzer()
-a.onLoad(() => {
-    document.querySelector('canvas')
-    const app = new Experience(document.querySelector('canvas') as HTMLCanvasElement, a)
-
-})
+const app = new Experience(document.querySelector('canvas') as HTMLCanvasElement)

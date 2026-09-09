@@ -198,7 +198,7 @@ void main()
 
         this.lineMaterial.uniforms.uTime.value = this.experience.time.elapsedTime
 
-        const volumeSmooth = this.experience.analyzer?.volumeSmooth ?? 0
+        const volumeSmooth = this.experience.audioManager?.volumeSmooth ?? 0
         this.lineMaterial.uniforms.uAudioVolume.value = volumeSmooth
 
         for(let i = 0; i<this.starsCount; i++){

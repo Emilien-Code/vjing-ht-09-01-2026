@@ -78,7 +78,7 @@ const SCENE_POST_PROCESSING: Record<SceneName, ScenePostProcessingConfig> = {
         ],
     },
     lightStormLevitating: {
-        constant: NO_EFFECT,
+        constant: { sobel: false, ascii: true, asciiCellSize: 4, rgbShift: false, bloom: false },
         glitches: [
             { sobel: true, ascii: true, asciiCellSize: 4, rgbShift: false, bloom: false },
             { sobel: false, ascii: true, asciiCellSize: 4, rgbShift: false, bloom: false },
@@ -112,7 +112,7 @@ export default class GlassScene extends World {
     private timeoutDelayId: number = -1
 
     private currentSceneIndex: number = -1
-    private musicReactive: boolean = false
+    private musicReactive: boolean = true
 
     private visibility: Record<SceneName, boolean> = {
         squaresFalling: false,

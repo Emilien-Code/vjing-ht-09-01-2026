@@ -532,12 +532,12 @@ export default class LogoLedScene extends World {
     // -----------------------------------------------------------------------
 
     private updateAudio(dt: number) {
-        const an = this.exp.analyzer
+        const an = this.exp.audioManager
         const p = this.params
 
         const volume = p.soundReactive ? (an?.volumeSmooth ?? 0) : 0
-        const kick = p.soundReactive ? (an?.kick ?? 0) : 0
-        const bins: Float32Array | undefined = p.soundReactive ? an?.volumeByFrequency : undefined
+        const kick = p.soundReactive ? (this.exp.bpmManager?.pulse ?? 0) : 0
+        const bins: Float32Array | undefined = p.soundReactive ? an?.spectrum : undefined
 
         this.smoothVolume += (volume - this.smoothVolume) * Math.min(1, dt * 8)
 

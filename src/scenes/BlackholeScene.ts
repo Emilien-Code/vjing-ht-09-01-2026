@@ -330,8 +330,8 @@ export default class BlackholeScene extends World {
         const cam = this.exp.camera.instance
         const center = this.uniforms.uCenter.value
         const t = this.exp.time.elapsedTime / 1000
-        const volume = this.exp.analyzer?.volumeSmooth ?? 0
-        const kick = this.exp.analyzer?.kick ?? 0
+        const volume = this.exp.audioManager?.volumeSmooth ?? 0
+        const kick = this.exp.bpmManager?.pulse ?? 0
         const cp = this.cameraParams
 
         const audioMul = cp.soundReactive ? 1 : 0
@@ -384,8 +384,8 @@ export default class BlackholeScene extends World {
         this.uniforms.uAspect.value = cam.aspect
         this.uniforms.uTime.value = (this.exp.time.elapsedTime / 1000) * this.blackHoleParams.timeScale
 
-        this.uniforms.uAudioVolume.value = this.exp.analyzer?.volumeSmooth ?? 0
-        this.uniforms.uKick.value = this.exp.analyzer?.kick ?? 0
+        this.uniforms.uAudioVolume.value = this.exp.audioManager?.volumeSmooth ?? 0
+        this.uniforms.uKick.value = this.exp.bpmManager?.pulse ?? 0
     }
 
     leave() { }

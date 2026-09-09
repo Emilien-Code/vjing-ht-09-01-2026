@@ -2,82 +2,72 @@ import * as THREE from 'three'
 
 export default class AudioManager {
 
-
   public frequencyArray: Uint8Array<ArrayBufferLike>
   public frequencyData: {
     low: number
     mid: number
     high: number
   }
+  // Full normalized (0..1) spectrum, one entry per analyser bin — the
+  // per-frequency-bin signal used by shaders/particles that sample bands.
+  public spectrum: Float32Array
+  public volume: number
+  public volumeSmooth: number
   public isPlaying: boolean
   public lowFrequency: number
   public midFrequency: number
   public highFrequency: number
-  public smoothedLowFrequency: number
   public audioContext: AudioContext | null
-  public song: { url: string }
   public audio: THREE.Audio | null = null
   public audioAnalyser: THREE.AudioAnalyser | null = null
   public bufferLength: number | null = null
 
   constructor() {
-    this.frequencyArray = new Uint8Array as Uint8Array<ArrayBufferLike>
+    this.frequencyArray = new Uint8Array() as Uint8Array<ArrayBufferLike>
     this.frequencyData = {
       low: 0,
       mid: 0,
       high: 0,
     }
+    this.spectrum = new Float32Array(0)
+    this.volume = 0
+    this.volumeSmooth = 0
     this.isPlaying = false
     this.lowFrequency = 10 //10Hz to 250Hz
     this.midFrequency = 150 //150Hz to 2000Hz
     this.highFrequency = 9000 //2000Hz to 20000Hz
-    this.smoothedLowFrequency = 0
     this.audioContext = null
-
-    this.song = {
-      url: '/03-Digeridoo (2022 Remaster).mp3',
-    }
   }
 
-  async loadAudioBuffer() {
-    // Load the audio file and create the audio buffer
-    const promise = new Promise(async (resolve, reject) => {
-      const audioListener = new THREE.AudioListener()
-      this.audio = new THREE.Audio(audioListener)
-      const audioLoader = new THREE.AudioLoader()
-
-      audioLoader.load(this.song.url, (buffer) => {
-        if (!this.audio) return
-        console.log("audio OK")
-        // if (!this.audioContext) return
-        console.log("audioContext OK ")
-        // if (!this.audioAnalyser) return
-        console.log("audioAnalyser OK ")
-
-        this.audio.setBuffer(buffer)
-        this.audio.setLoop(true)
-        this.audio.setVolume(0.5)
-        this.audioContext = this.audio.context
-        this.bufferLength = this.audioAnalyser.data.length
-        resolve()
-      })
-
-      this.audioAnalyser = new THREE.AudioAnalyser(this.audio, 1024)
+  // Live mic input — this project has no track playback anymore, the mic is
+  // the only source and it drives the continuous audio-reactive signals
+  // (frequencyData / spectrum / volumeSmooth). Beat timing itself comes from
+  // BPMManager, not from anything analysed here.
+  async connectMic() {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
     })
 
-    return promise
-  }
+    const audioListener = new THREE.AudioListener()
+    this.audio = new THREE.Audio(audioListener)
+    this.audio.setMediaStreamSource(stream)
 
-  play() {
-    if (!this.audio) return
-    this.audio.play()
+    this.audioAnalyser = new THREE.AudioAnalyser(this.audio, 1024)
+    this.audioContext = this.audio.context
+    this.bufferLength = this.audioAnalyser.data.length
+    this.spectrum = new Float32Array(this.bufferLength)
     this.isPlaying = true
-  }
 
-  pause() {
-    if (!this.audio) return
-    this.audio.pause()
-    this.isPlaying = false
+    // Browsers start a fresh AudioContext suspended until a user gesture.
+    if (this.audioContext.state !== 'running') {
+      const resume = () => {
+        this.audioContext?.resume()
+        window.removeEventListener('pointerdown', resume)
+        window.removeEventListener('keydown', resume)
+      }
+      window.addEventListener('pointerdown', resume)
+      window.addEventListener('keydown', resume)
+    }
   }
 
   collectAudioData() {
@@ -107,6 +97,15 @@ export default class AudioManager {
       mid: midAvg,
       high: highAvg,
     }
+
+    for (let i = 0; i < this.bufferLength; i++) {
+      this.spectrum[i] = this.frequencyArray[i] / 255
+    }
+
+    this.volume = (lowAvg + midAvg + highAvg) / 3
+    // attack fast, release slow — same shape the old analyzer used for its volumeSmooth
+    const rate = this.volume > this.volumeSmooth ? 0.5 : 0.08
+    this.volumeSmooth += (this.volume - this.volumeSmooth) * rate
   }
 
   calculateAverage(array: Uint8Array<ArrayBufferLike>, start: number, end: number) {
