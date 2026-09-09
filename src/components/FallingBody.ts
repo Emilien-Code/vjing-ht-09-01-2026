@@ -401,7 +401,6 @@ export default class FallingBody extends World {
 
     update() {
 
-        return 
         if (!this.params.locked) {
             // this.gltf.scene.rotation.y += 0.0051
             if (!this.params.beatEnabled) this.gltf.scene.position.z -= 0.0051
@@ -410,11 +409,11 @@ export default class FallingBody extends World {
         // Chase-light orbit speed reacts to volume/kick the same way
         // LogoLedScene's edge-chase pulse does.
         const dt = Math.min(this.exp.time.delta * 0.001, 0.1)
-        const volume = this.params.soundReactive ? (this.exp.analyzer?.volumeSmooth ?? 0) : 0
+        const volume = this.params.soundReactive ? (this.exp.audioManager?.volumeSmooth ?? 0) : 0
         this.smoothVolume += (volume - this.smoothVolume) * Math.min(1, dt * 8)
         this.punch += (0 - this.punch) * Math.min(1, dt * 6)
 
-        const bins: Float32Array | undefined = this.params.soundReactive ? this.exp.analyzer?.volumeByFrequency : undefined
+        const bins: Float32Array | undefined = this.params.soundReactive ? this.exp.audioManager?.spectrum : undefined
         updateLogoEdgeAudio(this.edgeAudio, bins, this.smoothVolume, this.punch, this.params as LogoEdgeAudioParams, dt)
 
         const dir = Math.sign(this.params.lightOrbitSpeed) || 1
