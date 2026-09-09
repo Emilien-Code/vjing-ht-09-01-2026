@@ -11,6 +11,7 @@ import GpgpuScene from "./worlds/SphereScene";
 import AudioManager from "./utils/managers/AudioManager";
 import BPMManager from "./utils/managers/BPMManager";
 import { exportSceneToGLB } from "./utils/SceneExporter";
+import HelpOverlay from "./utils/HelpOverlay";
 export default class Experience {
 
     public canvas: HTMLCanvasElement;
@@ -28,6 +29,7 @@ export default class Experience {
     public bpmManager: BPMManager | undefined
     public isAudioLoaded = false
     public world: World | null = null; // use the genera Page class type
+    public helpOverlay: HelpOverlay
 
     constructor(canvas: HTMLCanvasElement) {
 
@@ -42,6 +44,7 @@ export default class Experience {
         this.renderer = new Renderer(this);
         this.ressources = new Ressources(sources)
         this.ressources.startLoading()
+        this.helpOverlay = new HelpOverlay()
 
 
         this.sizes.on("resize", () => this.resize());
@@ -67,6 +70,8 @@ export default class Experience {
             } else if (e.code === 'Space') {
                 e.preventDefault()
                 this.world?.randomizeScene()
+            } else if (e.code === 'KeyH') {
+                this.helpOverlay.toggle()
             }
         })
     }

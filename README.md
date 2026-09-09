@@ -25,9 +25,12 @@ npm run preview  # preview the production build
 
 | Action | Control |
 | --- | --- |
+| Show/hide the in-app help overlay | `H` |
 | Toggle fullscreen | `F` |
 | Randomize scene | `Space` |
 | Open the control panel | add `#dev` to the URL, e.g. `https://lambent-douhua-190c96.netlify.app/#dev` |
+
+Press `H` at any time to bring up an on-screen overlay listing these controls and the scene rules below — handy during a live set when you don't want to leave the tab.
 
 The control panel (top-right, [lil-gui](https://lil-gui.georgealways.com/)) is hidden by default and only appears when the URL hash contains `dev`. It exposes:
 
