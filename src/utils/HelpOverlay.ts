@@ -38,14 +38,15 @@ export default class HelpOverlay {
                 <table style="width: 100%; border-collapse: collapse; margin-bottom: 24px;">
                     <tr><td style="padding: 4px 12px 4px 0; opacity: 0.7;">H</td><td>Toggle this help overlay</td></tr>
                     <tr><td style="padding: 4px 12px 4px 0; opacity: 0.7;">F</td><td>Toggle fullscreen</td></tr>
-                    <tr><td style="padding: 4px 12px 4px 0; opacity: 0.7;">Space</td><td>Randomize scene</td></tr>
+                    <tr><td style="padding: 4px 12px 4px 0; opacity: 0.7;">Space</td><td>Switch to a new (weighted-random) main scene</td></tr>
                     <tr><td style="padding: 4px 12px 4px 0; opacity: 0.7;">#dev</td><td>Add to the URL to reveal the control panel (BPM, tap tempo, scene visibility, post-processing, export)</td></tr>
                 </table>
 
                 <h2 style="margin: 0 0 8px; font-size: 15px; opacity: 0.8;">Scene rules</h2>
                 <ul style="margin: 0; padding-left: 18px;">
                     <li>Only one scene is visible at a time: squaresFalling, sphereLevitating, waterDancing, lightStormLevitating, logoLed.</li>
-                    <li>Every beat has a 1-in-3 chance to auto-switch to a random other scene (waterDancing is never picked automatically — reach it with Space).</li>
+                    <li>Automatic rotation alternates a main scene (squaresFalling, sphereLevitating, or logoLed — logoLed favored — lasting 12-108 beats) with a lightStormLevitating transition (1-5 beats, rarely a 6-12 beat "beat travel" variant, 1-in-8 chance). The same main scene/direction never repeats back to back.</li>
+                    <li>waterDancing is manual-only — it's excluded from automatic rotation and Space; reach it from the #dev control panel's Visibility checkboxes.</li>
                     <li>Every beat also has a 50% chance to fire a short glitch effect before reverting to that scene's default look.</li>
                 </ul>
 

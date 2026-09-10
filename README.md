@@ -27,7 +27,7 @@ npm run preview  # preview the production build
 | --- | --- |
 | Show/hide the in-app help overlay | `H` |
 | Toggle fullscreen | `F` |
-| Randomize scene | `Space` |
+| Switch to a new main scene | `Space` |
 | Open the control panel | add `#dev` to the URL, e.g. `https://lambent-douhua-190c96.netlify.app/#dev` |
 
 Press `H` at any time to bring up an on-screen overlay listing these controls and the scene rules below — handy during a live set when you don't want to leave the tab.
@@ -45,8 +45,11 @@ The control panel (top-right, [lil-gui](https://lil-gui.georgealways.com/)) is h
 There are 5 scenes: `squaresFalling`, `sphereLevitating`, `waterDancing`, `lightStormLevitating`, `logoLed`.
 
 - Only one scene is visible at a time — switching scenes hides all others first.
-- **Manual switch:** press `Space`, or (with the control panel open) check a scene's box under **Visibility**.
-- **Automatic switch:** with **Music Reactive** on, every beat has a 1-in-3 chance of switching to a random scene other than the current one (this pool never picks `waterDancing`, since it's only reachable manually or via `Space`).
-- **Glitch effects:** with **Music Reactive** on, every beat also has a 50% chance of firing a short, randomized post-processing glitch (sobel/ascii/rgb shift/bloom) that reverts back to that scene's default look shortly after.
+- **Manual switch:** press `Space` to jump to a new (weighted-random) main scene, or (with the control panel open) check a scene's box under **Visibility** to show any scene directly, including `waterDancing`, which is otherwise unreachable.
+- **Automatic switch:** with **Music Reactive** on, a "director" alternates between a *main* scene and a short *transition*:
+  - **Main phase** picks `squaresFalling` (forward or backward), `sphereLevitating`, or `logoLed`. There's a 2-in-3 chance of a "long" pick — `squaresFalling` (either direction) or `logoLed`, weighted so `logoLed` is twice as likely as each `squaresFalling` direction — lasting 36-108 beats; otherwise `sphereLevitating` for 12-36 beats. The same main scene/direction never repeats back to back.
+  - **Transition phase** switches to `lightStormLevitating` for 1-5 beats. There's a 1-in-8 chance it's instead a rare 6-12 beat "beat travel" variant, where the camera steps to a new point on its path 4 times per beat instead of gliding smoothly.
+  - `waterDancing` is excluded from this rotation entirely — it's only reachable manually via the control panel.
+- **Glitch effects:** with **Music Reactive** on, every beat also has a 50% chance of firing a short, randomized post-processing glitch drawn from that scene's own glitch pool, reverting back to that scene's default look shortly after. `sphereLevitating` and the normal `lightStormLevitating` transition have no glitches defined.
 - **`logoLed`** is also toggled by its own on/off state in the panel (turning it off returns to no scene selected rather than switching to another one).
 - Each scene defines its own default post-processing look and possible glitch variants; switching scenes resets post-processing to that scene's default.
