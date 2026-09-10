@@ -7,7 +7,7 @@ import GUI from "lil-gui"
 
 type SquaresEffect = 'kick' | 'none' | 'aside'
 
-const EFFECTS: SquaresEffect[] = ['kick', 'none', "aside"]
+const EFFECTS: SquaresEffect[] = ['kick', 'none']
 
 export default class SquaresFallingScene extends World {
 

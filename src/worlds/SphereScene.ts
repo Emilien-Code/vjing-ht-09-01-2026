@@ -60,6 +60,9 @@ const SCENE_POST_PROCESSING: Record<SceneName, ScenePostProcessingConfig> = {
     squaresFalling: {
         constant: NO_EFFECT,
         glitches: [
+            NO_EFFECT,
+            NO_EFFECT,
+            NO_EFFECT,
             { sobel: true, ascii: true, asciiCellSize: 4, rgbShift: false, bloom: true },
         ],
     },
@@ -76,10 +79,10 @@ const SCENE_POST_PROCESSING: Record<SceneName, ScenePostProcessingConfig> = {
             { sobel: false, ascii: true, asciiCellSize: 4, rgbShift: false, bloom: false }
         ],
     },
-    // Used only for the rare 6-beat camera-stepping variant, which keeps the
-    // original ascii-glitch postprocessing. The normal LightStorm transition
-    // uses LIGHTSTORM_NORMAL_POST (always NO_EFFECT) instead, applied
-    // directly in switchScene().
+    // Used for the beat-travel camera-stepping variant (now the only
+    // automatic LightStorm transition), which keeps the original
+    // ascii-glitch postprocessing. LIGHTSTORM_NORMAL_POST (always NO_EFFECT)
+    // still applies when lightStormLevitating is picked manually.
     lightStormLevitating: {
         constant: { sobel: false, ascii: true, asciiCellSize: 4, rgbShift: false, bloom: false },
         glitches: [
@@ -96,25 +99,26 @@ const SCENE_POST_PROCESSING: Record<SceneName, ScenePostProcessingConfig> = {
     },
 }
 
-// Sphere/LightStorm's "always NO_EFFECT" rule for the normal (non-beat-travel)
-// LightStorm transition. The rare beat-travel variant keeps its own config
-// in SCENE_POST_PROCESSING.lightStormLevitating instead.
+// Sphere/LightStorm's "always NO_EFFECT" rule, applied when
+// lightStormLevitating is picked manually (via Space or the Visibility
+// panel) rather than through the automatic beat-travel transition.
 const LIGHTSTORM_NORMAL_POST: ScenePostProcessingConfig = { constant: NO_EFFECT, glitches: [] }
 
 // --- Scene classification / selection rules ---
-// Long: 36-108 beats. Intermediate: 12-36 beats. Transition: 1-5 beats
-// (rarely 6-12, when the beat-travel LightStorm variant is picked).
-const LONG_DURATION_RANGE: [number, number] = [36, 108]
-const INTERMEDIATE_DURATION_RANGE: [number, number] = [12, 36]
-const TRANSITION_DURATION_RANGE: [number, number] = [1, 5]
+// Long: 12-36 beats (logoLed: 24-36 beats). Intermediate: 6-18 beats.
+// Transition (beat-travel LightStorm, now the only automatic transition
+// variant): 6-12 beats.
+const LONG_DURATION_RANGE: [number, number] = [12, 36]
+const LOGO_LED_DURATION_RANGE: [number, number] = [24, 36]
+const INTERMEDIATE_DURATION_RANGE: [number, number] = [6, 12]
 const TRANSITION_BEAT_TRAVEL_RANGE: [number, number] = [6, 12]
-const TRANSITION_BEAT_TRAVEL_CHANCE = 1 / 8
 
-type LongEntry = { name: 'squaresFalling' | 'logoLed', direction?: boolean, weight: number }
+type LongEntry = { name: 'squaresFalling' | 'logoLed', direction?: boolean, weight: number, durationRange: [number, number] }
+// logoLed vs squaresFalling: 3/4 vs 1/4 chance (weight 6 vs 1+1).
 const LONG_ENTRIES: LongEntry[] = [
-    { name: 'squaresFalling', direction: true, weight: 1 },
-    { name: 'squaresFalling', direction: false, weight: 1 },
-    { name: 'logoLed', weight: 2 },
+    { name: 'squaresFalling', direction: true, weight: 1, durationRange: LONG_DURATION_RANGE },
+    { name: 'squaresFalling', direction: false, weight: 1, durationRange: LONG_DURATION_RANGE },
+    { name: 'logoLed', weight: 6, durationRange: LOGO_LED_DURATION_RANGE },
 ]
 
 type IntermediateEntry = { name: 'sphereLevitating', weight: number }
@@ -141,7 +145,7 @@ function weightedPick<T extends { weight: number }>(entries: T[]): T {
 function pickMainScene(): MainPick {
     if (Math.random() < 2 / 3) {
         const entry = weightedPick(LONG_ENTRIES)
-        return { name: entry.name, direction: entry.direction, durationRange: LONG_DURATION_RANGE }
+        return { name: entry.name, direction: entry.direction, durationRange: entry.durationRange }
     }
     const entry = weightedPick(INTERMEDIATE_ENTRIES)
     return { name: entry.name, durationRange: INTERMEDIATE_DURATION_RANGE }
@@ -339,12 +343,9 @@ export default class GlassScene extends World {
 
     private advanceDirector() {
         if (this.director.phase === 'main') {
-            const useBeatTravel = Math.random() < TRANSITION_BEAT_TRAVEL_CHANCE
             this.director.phase = 'transition'
-            this.director.remainingBeats = useBeatTravel
-                ? randomIntInRange(TRANSITION_BEAT_TRAVEL_RANGE)
-                : randomIntInRange(TRANSITION_DURATION_RANGE)
-            this.switchScene(SCENE_NAMES.indexOf('lightStormLevitating'), { lightStormBeatTravel: useBeatTravel })
+            this.director.remainingBeats = randomIntInRange(TRANSITION_BEAT_TRAVEL_RANGE)
+            this.switchScene(SCENE_NAMES.indexOf('lightStormLevitating'), { lightStormBeatTravel: true })
             return
         }
 

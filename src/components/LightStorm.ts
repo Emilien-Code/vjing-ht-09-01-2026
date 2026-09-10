@@ -77,7 +77,7 @@ export default class LightStorm extends World {
         energyColor: 0x54d96a,
         energyIntensity: 1.5,
         noiseScale: 0.1,
-        upSpeed: -1.25,
+        upSpeed: -2,
     }
 
     private beatDownSpeed: number = 0
