@@ -28,10 +28,18 @@ export default class LightStormLevitatingScene extends World {
 
     // Rare alternate behavior: instead of continuously interpolating along
     // the current pathSequence, step the camera to a new fixed point on the
-    // curve once per beat, cycling through 6 positions.
+    // curve once per beat. 4 points sampled within each pathSequence range
+    // (3 ranges x 4 = 12) keeps it dynamic while staying on the curated
+    // "good" portions of the curve.
     private beatTravelMode = false
-    private travelPositions: number[] = this.pathSequences.flat()
+    private travelPositions: number[] = this.pathSequences.flatMap(([start, end]) => {
+        const steps = 4
+        return Array.from({ length: steps }, (_, i) => start + (end - start) * (i / steps))
+    })
     private travelIndex = 0
+    // How many camera steps happen within a single beat.
+    private stepsPerBeat = 4
+    private intraBeatTimeoutIds: number[] = []
 
     constructor(exp: Experience, water: Water) {
         super()
@@ -103,6 +111,8 @@ export default class LightStormLevitatingScene extends World {
         this.levitatingBody.setVisible(v)
         this.pathMesh.visible = false
 
+        this.clearIntraBeatTimeouts()
+
         if (v) {
             this.beatTravelMode = beatTravelMode
             if (beatTravelMode) {
@@ -144,6 +154,23 @@ export default class LightStormLevitatingScene extends World {
         this.levitatingBody.onBPMBeat()
         if (!this.visible || !this.beatTravelMode) return
 
+        this.clearIntraBeatTimeouts()
+
+        this.stepCameraTravel()
+
+        const beatMs = this.exp.bpmManager?.getBPMDuration() ?? 500
+        const stepMs = beatMs / this.stepsPerBeat
+        for (let i = 1; i < this.stepsPerBeat; i++) {
+            this.intraBeatTimeoutIds.push(setTimeout(() => this.stepCameraTravel(), stepMs * i))
+        }
+    }
+
+    private clearIntraBeatTimeouts() {
+        this.intraBeatTimeoutIds.forEach(id => clearTimeout(id))
+        this.intraBeatTimeoutIds = []
+    }
+
+    private stepCameraTravel() {
         this.travelIndex = (this.travelIndex + 1) % this.travelPositions.length
         this.updateCameraTravelStep()
     }
@@ -173,6 +200,7 @@ export default class LightStormLevitatingScene extends World {
     }
 
     leave() {
+        this.clearIntraBeatTimeouts()
         this.lightStorm.leave()
         this.levitatingBody.leave()
     }

@@ -103,13 +103,12 @@ const LIGHTSTORM_NORMAL_POST: ScenePostProcessingConfig = { constant: NO_EFFECT,
 
 // --- Scene classification / selection rules ---
 // Long: 36-108 beats. Intermediate: 12-36 beats. Transition: 1-5 beats
-// (rarely 6, when the beat-travel LightStorm variant is picked).
+// (rarely 6-12, when the beat-travel LightStorm variant is picked).
 const LONG_DURATION_RANGE: [number, number] = [36, 108]
 const INTERMEDIATE_DURATION_RANGE: [number, number] = [12, 36]
 const TRANSITION_DURATION_RANGE: [number, number] = [1, 5]
-const TRANSITION_BEAT_TRAVEL_BEATS = 6
-// "Rare" per spec, not an exact number given — tune if it should show up more/less.
-const TRANSITION_BEAT_TRAVEL_CHANCE = 1 / 6
+const TRANSITION_BEAT_TRAVEL_RANGE: [number, number] = [6, 12]
+const TRANSITION_BEAT_TRAVEL_CHANCE = 1 / 8
 
 type LongEntry = { name: 'squaresFalling' | 'logoLed', direction?: boolean, weight: number }
 const LONG_ENTRIES: LongEntry[] = [
@@ -343,7 +342,7 @@ export default class GlassScene extends World {
             const useBeatTravel = Math.random() < TRANSITION_BEAT_TRAVEL_CHANCE
             this.director.phase = 'transition'
             this.director.remainingBeats = useBeatTravel
-                ? TRANSITION_BEAT_TRAVEL_BEATS
+                ? randomIntInRange(TRANSITION_BEAT_TRAVEL_RANGE)
                 : randomIntInRange(TRANSITION_DURATION_RANGE)
             this.switchScene(SCENE_NAMES.indexOf('lightStormLevitating'), { lightStormBeatTravel: useBeatTravel })
             return
