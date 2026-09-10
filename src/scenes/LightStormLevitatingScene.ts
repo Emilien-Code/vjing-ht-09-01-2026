@@ -26,6 +26,13 @@ export default class LightStormLevitatingScene extends World {
     private currentSequence: [number, number] = this.pathSequences[0]
     private sequenceStartTime = 0
 
+    // Rare alternate behavior: instead of continuously interpolating along
+    // the current pathSequence, step the camera to a new fixed point on the
+    // curve once per beat, cycling through 6 positions.
+    private beatTravelMode = false
+    private travelPositions: number[] = this.pathSequences.flat()
+    private travelIndex = 0
+
     constructor(exp: Experience, water: Water) {
         super()
         this.exp = exp
@@ -89,7 +96,7 @@ export default class LightStormLevitatingScene extends World {
         scaleFolder.add(logo.scale, 'z', 0.01, 5, 0.01)
     }
 
-    setVisible(v: boolean) {
+    setVisible(v: boolean, beatTravelMode: boolean = false) {
         this.visible = v
         this.water.water.visible = v
         this.lightStorm.setVisible(v)
@@ -97,8 +104,14 @@ export default class LightStormLevitatingScene extends World {
         this.pathMesh.visible = false
 
         if (v) {
-            this.currentSequence = this.pathSequences[Math.floor(Math.random() * this.pathSequences.length)]
-            this.sequenceStartTime = this.exp.time.elapsedTime
+            this.beatTravelMode = beatTravelMode
+            if (beatTravelMode) {
+                this.travelIndex = 0
+                this.updateCameraTravelStep()
+            } else {
+                this.currentSequence = this.pathSequences[Math.floor(Math.random() * this.pathSequences.length)]
+                this.sequenceStartTime = this.exp.time.elapsedTime
+            }
         }
 
 
@@ -129,12 +142,25 @@ export default class LightStormLevitatingScene extends World {
     onBPMBeat() {
         this.lightStorm.onBPMBeat()
         this.levitatingBody.onBPMBeat()
+        if (!this.visible || !this.beatTravelMode) return
+
+        this.travelIndex = (this.travelIndex + 1) % this.travelPositions.length
+        this.updateCameraTravelStep()
+    }
+
+    private updateCameraTravelStep() {
+        const t = this.travelPositions[this.travelIndex]
+        const camPos = this.curve.getPoint(t)
+        this.exp.camera.instance.position.copy(camPos)
+        const lookTarget = this.levitatingBody.gltf.scene.position.clone()
+        lookTarget.y += 0.6
+        this.exp.camera.instance.lookAt(lookTarget)
     }
 
     update() {
         this.lightStorm.update()
         this.levitatingBody.update()
-        if (!this.visible) return
+        if (!this.visible || this.beatTravelMode) return
 
         const [start, end] = this.currentSequence
         const elapsed = (this.exp.time.elapsedTime - this.sequenceStartTime) / 1000

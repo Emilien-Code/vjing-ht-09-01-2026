@@ -13,6 +13,7 @@ export default class Squares extends World {
     private guiFolder!: GUI
     private rings: THREE.Group[] = []
     private boxes: THREE.Mesh[] = []
+    private direction = true
     private mat!: CustomToonMaterial
     private params = {
         count: 8,
@@ -133,8 +134,9 @@ export default class Squares extends World {
         v ? this.guiFolder.show() : this.guiFolder.hide()
     }
 
-    setVisible(v: boolean) {
+    setVisible(v: boolean, direction: boolean = true) {
         this.group.visible = v
+        if (v) this.direction = direction
     }
 
     onBPMBeat() {
@@ -154,7 +156,8 @@ export default class Squares extends World {
 
         for (let r = 0; r < this.rings.length; r++) {
             const phase = r * spacing
-            const progress = (t * this.params.forwardSpeed + phase) % this.params.tunnelLength
+            let progress = (t * this.params.forwardSpeed + phase) % this.params.tunnelLength
+            if (!this.direction) progress = this.params.tunnelLength - progress
             this.rings[r].position.z = progress - this.params.tunnelLength + nearClip
         }
 

@@ -37,7 +37,7 @@ export default class SquaresFallingScene extends World {
         this.squares.onReady()
     }
 
-    setVisible(v: boolean) {
+    setVisible(v: boolean, direction: boolean = true) {
         this.visible = v
         this.effect = '';
         if (v) {
@@ -68,8 +68,8 @@ export default class SquaresFallingScene extends World {
             }
         }
 
-        this.squares.setVisible(v)
-        this.fallingBody.setVisible(v, this.effect)
+        this.squares.setVisible(v, direction)
+        this.fallingBody.setVisible(v, this.effect, direction)
     }
 
     showGUI(v: boolean) {

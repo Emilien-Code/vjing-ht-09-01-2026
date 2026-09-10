@@ -64,10 +64,9 @@ const SCENE_POST_PROCESSING: Record<SceneName, ScenePostProcessingConfig> = {
         ],
     },
     sphereLevitating: {
+        // Sphere is always NO_EFFECT, no glitches.
         constant: NO_EFFECT,
-        glitches: [
-            { sobel: false, ascii: true, asciiCellSize: 4, rgbShift: false, bloom: false },
-        ],
+        glitches: [],
     },
     waterDancing: {
         constant: NO_EFFECT,
@@ -77,6 +76,10 @@ const SCENE_POST_PROCESSING: Record<SceneName, ScenePostProcessingConfig> = {
             { sobel: false, ascii: true, asciiCellSize: 4, rgbShift: false, bloom: false }
         ],
     },
+    // Used only for the rare 6-beat camera-stepping variant, which keeps the
+    // original ascii-glitch postprocessing. The normal LightStorm transition
+    // uses LIGHTSTORM_NORMAL_POST (always NO_EFFECT) instead, applied
+    // directly in switchScene().
     lightStormLevitating: {
         constant: { sobel: false, ascii: true, asciiCellSize: 4, rgbShift: false, bloom: false },
         glitches: [
@@ -91,6 +94,58 @@ const SCENE_POST_PROCESSING: Record<SceneName, ScenePostProcessingConfig> = {
             { sobel: false, ascii: true, asciiCellSize: 4, rgbShift: true, bloom: false },
         ],
     },
+}
+
+// Sphere/LightStorm's "always NO_EFFECT" rule for the normal (non-beat-travel)
+// LightStorm transition. The rare beat-travel variant keeps its own config
+// in SCENE_POST_PROCESSING.lightStormLevitating instead.
+const LIGHTSTORM_NORMAL_POST: ScenePostProcessingConfig = { constant: NO_EFFECT, glitches: [] }
+
+// --- Scene classification / selection rules ---
+// Long: 36-108 beats. Intermediate: 12-36 beats. Transition: 1-5 beats
+// (rarely 6, when the beat-travel LightStorm variant is picked).
+const LONG_DURATION_RANGE: [number, number] = [36, 108]
+const INTERMEDIATE_DURATION_RANGE: [number, number] = [12, 36]
+const TRANSITION_DURATION_RANGE: [number, number] = [1, 5]
+const TRANSITION_BEAT_TRAVEL_BEATS = 6
+// "Rare" per spec, not an exact number given — tune if it should show up more/less.
+const TRANSITION_BEAT_TRAVEL_CHANCE = 1 / 6
+
+type LongEntry = { name: 'squaresFalling' | 'logoLed', direction?: boolean, weight: number }
+const LONG_ENTRIES: LongEntry[] = [
+    { name: 'squaresFalling', direction: true, weight: 1 },
+    { name: 'squaresFalling', direction: false, weight: 1 },
+    { name: 'logoLed', weight: 2 },
+]
+
+type IntermediateEntry = { name: 'sphereLevitating', weight: number }
+const INTERMEDIATE_ENTRIES: IntermediateEntry[] = [
+    { name: 'sphereLevitating', weight: 1 },
+]
+
+type MainPick = { name: 'squaresFalling' | 'logoLed' | 'sphereLevitating', direction?: boolean, durationRange: [number, number] }
+
+function randomIntInRange([min, max]: [number, number]): number {
+    return Math.floor(min + Math.random() * (max - min + 1))
+}
+
+function weightedPick<T extends { weight: number }>(entries: T[]): T {
+    const total = entries.reduce((sum, e) => sum + e.weight, 0)
+    let r = Math.random() * total
+    for (const entry of entries) {
+        if (r < entry.weight) return entry
+        r -= entry.weight
+    }
+    return entries[entries.length - 1]
+}
+
+function pickMainScene(): MainPick {
+    if (Math.random() < 2 / 3) {
+        const entry = weightedPick(LONG_ENTRIES)
+        return { name: entry.name, direction: entry.direction, durationRange: LONG_DURATION_RANGE }
+    }
+    const entry = weightedPick(INTERMEDIATE_ENTRIES)
+    return { name: entry.name, durationRange: INTERMEDIATE_DURATION_RANGE }
 }
 
 export default class GlassScene extends World {
@@ -113,6 +168,18 @@ export default class GlassScene extends World {
 
     private currentSceneIndex: number = -1
     private musicReactive: boolean = true
+    private sceneBeatCount: number = 0
+    private sceneBeatDuration: number = 0
+    private currentPostProcessing: ScenePostProcessingConfig | null = null
+
+    // Drives the long/intermediate/transition scene rotation: 'transition'
+    // starting with 0 remaining beats means the very first beat immediately
+    // picks a main scene, matching the old startup behavior.
+    private director: { phase: 'main' | 'transition', remainingBeats: number, lastMainKey: string } = {
+        phase: 'transition',
+        remainingBeats: 0,
+        lastMainKey: '',
+    }
 
     private visibility: Record<SceneName, boolean> = {
         squaresFalling: false,
@@ -178,13 +245,23 @@ export default class GlassScene extends World {
         this.clouds.setVisible(false)
     }
 
-    private switchScene(index: number) {
+    private switchScene(index: number, options: { direction?: boolean, lightStormBeatTravel?: boolean } = {}) {
         clearTimeout(this.timeoutDurationId)
         clearTimeout(this.timeoutDelayId)
         this.hideAll()
         this.currentSceneIndex = index
         const name = SCENE_NAMES[index]
-        this.getScene(name).setVisible(true)
+
+        this.sceneBeatCount = 0
+        this.sceneBeatDuration = this.director.remainingBeats
+
+        if (name === 'squaresFalling') {
+            this.squaresFalling.setVisible(true, options.direction ?? true)
+        } else if (name === 'lightStormLevitating') {
+            this.lightStormLevitating.setVisible(true, options.lightStormBeatTravel ?? false)
+        } else {
+            this.getScene(name).setVisible(true)
+        }
         this.visibility[name] = true
 
         const cloudParams = CLOUDS_PARAMS[name]
@@ -193,14 +270,17 @@ export default class GlassScene extends World {
             this.clouds.setVisible(true)
         }
 
-        this.exp.renderer.applyPostProcessingPreset(SCENE_POST_PROCESSING[name].constant)
+        this.currentPostProcessing = name === 'lightStormLevitating'
+            ? (options.lightStormBeatTravel ? SCENE_POST_PROCESSING.lightStormLevitating : LIGHTSTORM_NORMAL_POST)
+            : SCENE_POST_PROCESSING[name]
+
+        this.exp.renderer.applyPostProcessingPreset(this.currentPostProcessing.constant)
         this.gui.controllersRecursive().forEach(c => c.updateDisplay())
     }
 
     private triggerGlitch() {
-        if (this.currentSceneIndex < 0) return
-        const name = SCENE_NAMES[this.currentSceneIndex]
-        const config = SCENE_POST_PROCESSING[name]
+        if (this.currentSceneIndex < 0 || !this.currentPostProcessing) return
+        const config = this.currentPostProcessing
         if (config.glitches.length === 0) return
 
         clearTimeout(this.timeoutDurationId)
@@ -235,30 +315,54 @@ export default class GlassScene extends World {
     }
 
     randomizeScene() {
-        const candidates = SCENE_NAMES
-            .map((_, i) => i)
-            .filter(i => i !== this.currentSceneIndex)
-        const next = candidates[Math.floor(Math.random() * candidates.length)]
-        this.switchScene(next)
+        const pick = pickMainScene()
+        this.director.phase = 'main'
+        this.director.remainingBeats = randomIntInRange(pick.durationRange)
+        this.director.lastMainKey = `${pick.name}:${pick.direction ?? ''}`
+        this.switchScene(SCENE_NAMES.indexOf(pick.name), { direction: pick.direction })
     }
 
     onBPMBeat() {
-        // if (!this.exp.audioManager || !this.exp.bpmManager) return
+        this.sceneBeatCount++
+        const currentName = this.currentSceneIndex >= 0 ? SCENE_NAMES[this.currentSceneIndex] : 'none'
+        console.log(`beat ${this.sceneBeatCount}/${this.sceneBeatDuration} (${currentName})`)
+
         SCENE_NAMES.forEach(name => {
             if (this.visibility[name]) this.getScene(name).onBPMBeat()
         })
         if (!this.musicReactive) return
 
-
         if (Math.random() < 0.5) this.triggerGlitch()
 
-        if (Math.random() < 1 / 3) {
-            const candidates = SCENE_NAMES
-                .map((_, i) => i)
-                .filter(i => i !== this.currentSceneIndex && SCENE_NAMES[i] !== 'waterDancing')
-            const next = candidates[Math.floor(Math.random() * candidates.length)]
-            this.switchScene(next)
+        this.director.remainingBeats--
+        if (this.director.remainingBeats <= 0) this.advanceDirector()
+    }
+
+    private advanceDirector() {
+        if (this.director.phase === 'main') {
+            const useBeatTravel = Math.random() < TRANSITION_BEAT_TRAVEL_CHANCE
+            this.director.phase = 'transition'
+            this.director.remainingBeats = useBeatTravel
+                ? TRANSITION_BEAT_TRAVEL_BEATS
+                : randomIntInRange(TRANSITION_DURATION_RANGE)
+            this.switchScene(SCENE_NAMES.indexOf('lightStormLevitating'), { lightStormBeatTravel: useBeatTravel })
+            return
         }
+
+        // Avoid immediately repeating the same main scene/variant back to back.
+        let pick = pickMainScene()
+        let key = `${pick.name}:${pick.direction ?? ''}`
+        let attempts = 0
+        while (key === this.director.lastMainKey && attempts < 5) {
+            pick = pickMainScene()
+            key = `${pick.name}:${pick.direction ?? ''}`
+            attempts++
+        }
+
+        this.director.phase = 'main'
+        this.director.lastMainKey = key
+        this.director.remainingBeats = randomIntInRange(pick.durationRange)
+        this.switchScene(SCENE_NAMES.indexOf(pick.name), { direction: pick.direction })
     }
 
     update() {

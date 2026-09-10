@@ -60,6 +60,7 @@ export default class FallingBody extends World {
     private chaseAngle = 0
     private smoothVolume = 0
     private punch = 0
+    private direction = true
 
     // Per-edge audio-reactive glow level — same array shape and meaning as
     // LogoLedScene's uEdgeAudio (indexed via LOGO_EDGE_BAND_SLOT internally),
@@ -384,10 +385,11 @@ export default class FallingBody extends World {
 
         }
     }
-    setVisible(v: boolean, effect: string) {
+    setVisible(v: boolean, effect: string, direction: boolean = true) {
         this.showGUI(v)
         if (v) {
             this.applyEffect(effect)
+            this.direction = direction
         }
         this.gltf.scene.visible = v
         this.holder.visible = v
@@ -403,7 +405,7 @@ export default class FallingBody extends World {
 
         if (!this.params.locked) {
             // this.gltf.scene.rotation.y += 0.0051
-            if (!this.params.beatEnabled) this.gltf.scene.position.z -= 0.0051
+            if (!this.params.beatEnabled) this.gltf.scene.position.z += (this.direction ? -1 : 1) * 0.0051
         }
 
         // Chase-light orbit speed reacts to volume/kick the same way
