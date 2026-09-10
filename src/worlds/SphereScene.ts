@@ -110,7 +110,7 @@ const LIGHTSTORM_NORMAL_POST: ScenePostProcessingConfig = { constant: NO_EFFECT,
 // variant): 6-12 beats.
 const LONG_DURATION_RANGE: [number, number] = [12, 36]
 const LOGO_LED_DURATION_RANGE: [number, number] = [24, 36]
-const INTERMEDIATE_DURATION_RANGE: [number, number] = [6, 8]
+const INTERMEDIATE_DURATION_RANGE: [number, number] = [6, 10]
 const TRANSITION_BEAT_TRAVEL_RANGE: [number, number] = [6, 12]
 
 type LongEntry = { name: 'squaresFalling' | 'logoLed', direction?: boolean, weight: number, durationRange: [number, number] }
