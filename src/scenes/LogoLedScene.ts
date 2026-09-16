@@ -103,6 +103,32 @@ export default class LogoLedScene extends World {
     // instead of gliding. A direct time-based advance is always continuous.
     private autoU = 0
 
+    // Beat-travel variant: the LogoLed equivalent of
+    // LightStormLevitatingScene's camera-stepping transition. This scene has
+    // no real camera, but rotation/scale of the logo are effectively the
+    // "framing". LightStorm's version reads as coherent rather than chaotic
+    // because the camera always looks at the same fixed subject — only the
+    // vantage hops, the subject itself never drifts. So here the logo's
+    // position (offsetX/offsetY) stays pinned to the resting pose at all
+    // times; only rotation/scale punch on the beat, around one gentle orbit
+    // so neighbouring shots stay close together too. Net effect: a snappy
+    // pulse on one steady, anchored shot instead of the logo wandering
+    // around the screen.
+    private beatTravelMode = false
+    private travelShots: { offsetX: number, offsetY: number, rotation: number, scale: number }[] =
+        Array.from({ length: 8 }, (_, i) => {
+            const a = (i / 8) * Math.PI * 2
+            return {
+                offsetX: 0,
+                offsetY: 0.04,
+                rotation: Math.sin(a) * 5,
+                scale: 0.62 + Math.cos(a * 2) * 0.03,
+            }
+        })
+    private travelIndex = 0
+    private stepsPerBeat = 4
+    private intraBeatTimeoutIds: number[] = []
+
     // Public so the owning world can put a quick-access control (pulse speed)
     // directly on the root GUI, next to the scene's visibility toggle.
     public params = {
@@ -533,10 +559,39 @@ export default class LogoLedScene extends World {
         v ? this.folder.show() : this.folder.hide()
     }
 
-    setVisible(v: boolean) {
+    setVisible(v: boolean, beatTravelMode: boolean = false) {
         this.visible = v
         this.guiState.visible = v
         this.mesh.visible = v
+
+        this.clearIntraBeatTimeouts()
+        this.beatTravelMode = v && beatTravelMode
+
+        if (this.beatTravelMode) {
+            this.travelIndex = Math.floor(Math.random() * this.travelShots.length)
+            this.applyTravelShot()
+        }
+    }
+
+    private clearIntraBeatTimeouts() {
+        this.intraBeatTimeoutIds.forEach(id => clearTimeout(id))
+        this.intraBeatTimeoutIds = []
+    }
+
+    private applyTravelShot() {
+        const shot = this.travelShots[this.travelIndex]
+        this.params.offsetX = shot.offsetX
+        this.params.offsetY = shot.offsetY
+        this.params.rotation = shot.rotation
+        this.params.scale = shot.scale
+        this.uniforms.uScale.value = shot.scale
+        this.resize()
+        this.folder.controllersRecursive().forEach(c => c.updateDisplay())
+    }
+
+    private stepCameraTravel() {
+        this.travelIndex = (this.travelIndex + 1) % this.travelShots.length
+        this.applyTravelShot()
     }
 
     // -----------------------------------------------------------------------
@@ -579,6 +634,17 @@ export default class LogoLedScene extends World {
         console.log('beat')
         this.punch = 1
         this.flash = Math.max(this.flash, this.params.kickFlash)
+
+        if (!this.beatTravelMode) return
+
+        this.clearIntraBeatTimeouts()
+        this.stepCameraTravel()
+
+        const beatMs = this.exp.bpmManager?.getBPMDuration() ?? 500
+        const stepMs = beatMs / this.stepsPerBeat
+        for (let i = 1; i < this.stepsPerBeat; i++) {
+            this.intraBeatTimeoutIds.push(setTimeout(() => this.stepCameraTravel(), stepMs * i))
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -593,13 +659,21 @@ export default class LogoLedScene extends World {
         this.updateAudio(dt)
 
         this.uniforms.uTime.value = t
-        this.uniforms.uOffset.value.set(
-            p.offsetX,
-            p.offsetY + Math.sin(t * p.floatSpeed * Math.PI * 2) * p.floatAmount,
-        )
-        this.uniforms.uRot.value = (
-            p.rotation + Math.sin(t * p.swaySpeed * Math.PI * 2) * p.swayAmount
-        ) * Math.PI / 180
+
+        if (this.beatTravelMode) {
+            // Framing is hard-cut per beat step (see stepCameraTravel) — no
+            // continuous drift on top, so cuts read as clean jumps.
+            this.uniforms.uOffset.value.set(p.offsetX, p.offsetY)
+            this.uniforms.uRot.value = p.rotation * Math.PI / 180
+        } else {
+            this.uniforms.uOffset.value.set(
+                p.offsetX,
+                p.offsetY + Math.sin(t * p.floatSpeed * Math.PI * 2) * p.floatAmount,
+            )
+            this.uniforms.uRot.value = (
+                p.rotation + Math.sin(t * p.swaySpeed * Math.PI * 2) * p.swayAmount
+            ) * Math.PI / 180
+        }
 
         if (p.mouseFollow) {
             // Undo the shader's toLogo transform (offset/rotate/scale, using
@@ -639,6 +713,7 @@ export default class LogoLedScene extends World {
     }
 
     clean() {
+        this.clearIntraBeatTimeouts()
         window.removeEventListener('pointermove', this.onPointerMove)
         this.scene.remove(this.mesh)
         this.mesh.geometry.dispose()
@@ -646,5 +721,7 @@ export default class LogoLedScene extends World {
         this.folder.destroy()
     }
 
-    leave() { }
+    leave() {
+        this.clearIntraBeatTimeouts()
+    }
 }
