@@ -87,6 +87,7 @@ export default class LogoLedScene extends World {
     private smoothVolume = 0
     private flash = 0
     private punch = 0
+    private backPunch = 0
 
     // Raw pointer position, in the same aspect-corrected screen space as the
     // shader's `p` (origin centre, y up) — updated on every pointermove.
@@ -128,6 +129,9 @@ export default class LogoLedScene extends World {
         backIntensity: 0.25,
         backBase: 0,
         backAudio: 0.9,
+        backKick: 0.3,
+        backAttack: 0.35,
+        backRelease: 0.12,
         rimRadius: 0.012,
         rimIntensity: 0,
         interior: 0.22,
@@ -198,6 +202,8 @@ export default class LogoLedScene extends World {
             uBackIntensity: { value: this.params.backIntensity },
             uBackBase: { value: this.params.backBase },
             uBackAudio: { value: this.params.backAudio },
+            uBackKick: { value: this.params.backKick },
+            uPunch: { value: 0 },
             uRimRadius: { value: this.params.rimRadius },
             uRimIntensity: { value: this.params.rimIntensity },
             uInterior: { value: this.params.interior },
@@ -277,6 +283,8 @@ export default class LogoLedScene extends World {
                 uniform float uBackIntensity;
                 uniform float uBackBase;
                 uniform float uBackAudio;
+                uniform float uBackKick;
+                uniform float uPunch;
                 uniform float uRimRadius;
                 uniform float uRimIntensity;
                 uniform float uInterior;
@@ -335,7 +343,7 @@ export default class LogoLedScene extends World {
                     // Light escaping from behind the slab: a broad halo hugging
                     // the silhouette, breathing with the overall level.
                     float back = exp(-max(sd, 0.0) / max(uBackRadius, 1e-3))
-                        * uBackIntensity * (uBackBase + uVolume * uBackAudio);
+                        * uBackIntensity * (uBackBase + uVolume * uBackAudio + uPunch * uBackKick);
 
                     vec3 light = uColor * (glow * uLedIntensity + back);
                     col += light * outside * (1.0 + uFlash);
@@ -352,7 +360,7 @@ export default class LogoLedScene extends World {
                             vec2 fr = logoEval(toLogo(fp), 1.0 + depth * uFloorBlur);
 
                             float fBack = exp(-max(fr.x, 0.0) / max(uBackRadius, 1e-3))
-                                * uBackIntensity * (uBackBase + uVolume * uBackAudio) * 0.6;
+                                * uBackIntensity * (uBackBase + uVolume * uBackAudio + uPunch * uBackKick) * 0.6;
                             float atten = exp(-depth * uFloorFalloff);
                             float n = 0.6 + 0.4 * snoise(vec3(fp * uFloorNoiseScale, uTime * 0.06));
 
@@ -464,6 +472,10 @@ export default class LogoLedScene extends World {
             .onChange((v: number) => { u.uBackBase.value = v })
         hidden.add(this.params, 'backAudio', 0, 5, 0.01).name('audio amount')
             .onChange((v: number) => { u.uBackAudio.value = v })
+        hidden.add(this.params, 'backKick', 0, 5, 0.01).name('kick punch')
+            .onChange((v: number) => { u.uBackKick.value = v })
+        hidden.add(this.params, 'backAttack', 0.01, 1, 0.01).name('kick attack')
+        hidden.add(this.params, 'backRelease', 0.01, 1, 0.01).name('kick release')
         hidden.close()
 
         const floor = this.folder.addFolder('floor')
@@ -548,11 +560,18 @@ export default class LogoLedScene extends World {
 
         updateLogoEdgeAudio(this.edgeAudio, bins, this.smoothVolume, this.punch, p as LogoEdgeAudioParams, dt, chase)
 
+        // Backlight punch chases the same beat trigger as everything else,
+        // but through its own attack/release so its snap and fade can be
+        // tuned independently of the edge LEDs and the pulse speed-burst.
+        const backRate = this.punch > this.backPunch ? p.backAttack : p.backRelease
+        this.backPunch += (this.punch - this.backPunch) * Math.min(1, backRate * dt * 60)
+
         this.punch += (0 - this.punch) * Math.min(1, dt * 6)
         this.flash += (kick * p.kickFlash - this.flash) * Math.min(1, dt * 10)
 
         this.uniforms.uVolume.value = this.smoothVolume
         this.uniforms.uFlash.value = this.flash
+        this.uniforms.uPunch.value = this.backPunch
     }
 
     onBPMBeat() {
