@@ -10,9 +10,10 @@ import SphereLevitatingScene from "../scenes/SphereLevitatingScene"
 import WaterDancingScene from "../scenes/WaterDancingScene"
 import LightStormLevitatingScene from "../scenes/LightStormLevitatingScene"
 import LogoLedScene from "../scenes/LogoLedScene"
+import HolographicLogoScene from "../scenes/HolographicLogoScene"
 import type { PostProcessingPreset } from "../utils/Renderer"
 
-type SceneName = 'squaresFalling' | 'sphereLevitating' | 'waterDancing' | 'lightStormLevitating' | 'logoLed'
+type SceneName = 'squaresFalling' | 'sphereLevitating' | 'waterDancing' | 'lightStormLevitating' | 'logoLed' | 'holographicLogo'
 
 const SCENE_NAMES: SceneName[] = [
     'squaresFalling',
@@ -20,6 +21,7 @@ const SCENE_NAMES: SceneName[] = [
     'waterDancing',
     'lightStormLevitating',
     'logoLed',
+    'holographicLogo',
 ]
 
 const NO_EFFECT: PostProcessingPreset = { sobel: false, ascii: false, asciiCellSize: 4, rgbShift: false, bloom: false }
@@ -97,6 +99,10 @@ const SCENE_POST_PROCESSING: Record<SceneName, ScenePostProcessingConfig> = {
             { sobel: false, ascii: true, asciiCellSize: 4, rgbShift: true, bloom: false },
         ],
     },
+    holographicLogo: {
+        constant: NO_EFFECT,
+        glitches: [],
+    },
 }
 
 // Sphere/LightStorm's "always NO_EFFECT" rule, applied when
@@ -107,7 +113,8 @@ const LIGHTSTORM_NORMAL_POST: ScenePostProcessingConfig = { constant: NO_EFFECT,
 // --- Scene classification / selection rules ---
 // Long: 12-36 beats (logoLed: 24-36 beats). Intermediate: 6-18 beats.
 // Transition: 6-12 beats, always plays between main scenes — a short,
-// beat-driven "camera moving fast" interlude picked from TRANSITION_ENTRIES.
+// beat-driven "camera moving fast" interlude (lightStormLevitating's
+// beat-travel variant).
 const LONG_DURATION_RANGE: [number, number] = [12, 36]
 const LOGO_LED_DURATION_RANGE: [number, number] = [24, 36]
 const INTERMEDIATE_DURATION_RANGE: [number, number] = [6, 10]
@@ -124,17 +131,6 @@ const LONG_ENTRIES: LongEntry[] = [
 type IntermediateEntry = { name: 'sphereLevitating', weight: number }
 const INTERMEDIATE_ENTRIES: IntermediateEntry[] = [
     { name: 'sphereLevitating', weight: 1 },
-]
-
-// The automatic transition between main scenes: same rule as LightStorm's
-// original beat-travel (always fires, TRANSITION_BEAT_TRAVEL_RANGE long),
-// now picked between the two scenes that have a beat-travel variant.
-type TransitionEntry =
-    | { name: 'lightStormLevitating', weight: number }
-    | { name: 'logoLed', logoLedBeatTravel: true, weight: number }
-const TRANSITION_ENTRIES: TransitionEntry[] = [
-    { name: 'lightStormLevitating', weight: 1 },
-    { name: 'logoLed', logoLedBeatTravel: true, weight: 1 },
 ]
 
 type MainPick = { name: 'squaresFalling' | 'logoLed' | 'sphereLevitating', direction?: boolean, durationRange: [number, number] }
@@ -176,6 +172,7 @@ export default class GlassScene extends World {
     private waterDancing!: WaterDancingScene
     private lightStormLevitating!: LightStormLevitatingScene
     private logoLed!: LogoLedScene
+    private holographicLogo!: HolographicLogoScene
 
     private timeoutDurationId: number = -1
     private timeoutDelayId: number = -1
@@ -201,12 +198,8 @@ export default class GlassScene extends World {
         waterDancing: false,
         lightStormLevitating: false,
         logoLed: false,
+        holographicLogo: false,
     }
-
-    // Separate GUI toggle for previewing logoLed's beat-travel variant
-    // (kept in sync with reality in switchScene, including when the
-    // automatic director picks it).
-    private logoLedBeatTravelState = { on: false }
 
     constructor(exp: Experience) {
         super()
@@ -239,6 +232,16 @@ export default class GlassScene extends World {
             }
         }
 
+        this.holographicLogo = new HolographicLogoScene(exp)
+        this.holographicLogo.onToggle = (v: boolean) => {
+            if (v) {
+                this.switchScene(SCENE_NAMES.indexOf('holographicLogo'))
+            } else {
+                this.hideAll()
+                this.currentSceneIndex = -1
+            }
+        }
+
         this.clouds = new Clouds(exp, CLOUDS_PARAMS.squaresFalling!)
         this.clouds.createClouds()
         this.clouds.setVisible(false)
@@ -253,6 +256,7 @@ export default class GlassScene extends World {
             waterDancing: this.waterDancing,
             lightStormLevitating: this.lightStormLevitating,
             logoLed: this.logoLed,
+            holographicLogo: this.holographicLogo,
         }[name]
     }
 
@@ -264,7 +268,7 @@ export default class GlassScene extends World {
         this.clouds.setVisible(false)
     }
 
-    private switchScene(index: number, options: { direction?: boolean, lightStormBeatTravel?: boolean, logoLedBeatTravel?: boolean } = {}) {
+    private switchScene(index: number, options: { direction?: boolean, lightStormBeatTravel?: boolean } = {}) {
         clearTimeout(this.timeoutDurationId)
         clearTimeout(this.timeoutDelayId)
         this.hideAll()
@@ -279,12 +283,11 @@ export default class GlassScene extends World {
         } else if (name === 'lightStormLevitating') {
             this.lightStormLevitating.setVisible(true, options.lightStormBeatTravel ?? false)
         } else if (name === 'logoLed') {
-            this.logoLed.setVisible(true, options.logoLedBeatTravel ?? false)
+            this.logoLed.setVisible(true)
         } else {
             this.getScene(name).setVisible(true)
         }
         this.visibility[name] = true
-        this.logoLedBeatTravelState.on = name === 'logoLed' && (options.logoLedBeatTravel ?? false)
 
         const cloudParams = CLOUDS_PARAMS[name]
         if (cloudParams) {
@@ -330,9 +333,6 @@ export default class GlassScene extends World {
                 this.switchScene(SCENE_NAMES.findIndex(n => n == name))
             })
         })
-        folder.add(this.logoLedBeatTravelState, 'on').name('logoLed (beat travel)').onChange((v: boolean) => {
-            this.switchScene(SCENE_NAMES.indexOf('logoLed'), { logoLedBeatTravel: v })
-        })
     }
 
     onReady() {
@@ -367,12 +367,7 @@ export default class GlassScene extends World {
         if (this.director.phase === 'main') {
             this.director.phase = 'transition'
             this.director.remainingBeats = randomIntInRange(TRANSITION_BEAT_TRAVEL_RANGE)
-            const transition = weightedPick(TRANSITION_ENTRIES)
-            if (transition.name === 'lightStormLevitating') {
-                this.switchScene(SCENE_NAMES.indexOf('lightStormLevitating'), { lightStormBeatTravel: true })
-            } else {
-                this.switchScene(SCENE_NAMES.indexOf('logoLed'), { logoLedBeatTravel: true })
-            }
+            this.switchScene(SCENE_NAMES.indexOf('lightStormLevitating'), { lightStormBeatTravel: true })
             return
         }
 
@@ -399,6 +394,7 @@ export default class GlassScene extends World {
         this.waterDancing.update()
         this.lightStormLevitating.update()
         this.logoLed.update()
+        this.holographicLogo.update()
         this.clouds.update()
     }
 

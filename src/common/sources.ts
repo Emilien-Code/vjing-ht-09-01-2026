@@ -51,6 +51,11 @@ const sources = [
         type: "texture",
         path: ["sphere_color.jpg"]
     },
+    {
+        name: "ht_logo",
+        type: "GLTFModel",
+        path: ["ht_logo.glb"]
+    },
 
 ]
 
