@@ -1,24 +1,31 @@
 import Experience from "../Experience"
-import * as THREE from "three"
+import * as THREE from 'three/webgpu'
 import GUI from "lil-gui"
 import World from "../classes/World"
-import simplex3D from "../shaders/simplex3D"
+import { NodeMaterial } from 'three/webgpu'
+import * as TSL from 'three/tsl'
+import { snoise3 } from "../tsl/noise"
+
+// Untyped: @types/three's TSL typings can't follow this kind of graph building.
+const {
+    Fn, If, Loop, Break, uniform, uv, positionGeometry, float, vec3, vec4,
+    length, normalize, cross, dot, clamp, mix, pow, max, sqrt, step, floor, fract,
+    smoothstep, sin, cos, atan,
+} = TSL as any
 
 // Black hole scene: a full-screen Schwarzschild black hole rendered by
 // integrating each pixel's light path through curved spacetime (Binet
 // equation for equatorial null geodesics), with an accretion disk shaded
-// for Doppler beaming and gravitational redshift. Shader ported from a
-// TSL/WebGPU raymarcher to plain GLSL since this project's renderer is a
-// classic WebGLRenderer.
+// for Doppler beaming and gravitational redshift. Written in TSL.
 export default class BlackholeScene extends World {
 
     private exp: Experience
     private scene: THREE.Scene
     private gui: GUI
 
-    private material!: THREE.ShaderMaterial
+    private material!: NodeMaterial
     private mesh!: THREE.Mesh
-    private uniforms: { [key: string]: THREE.IUniform }
+    private uniforms: Record<string, any>
     private visible = false
 
     private blackHoleParams = {
@@ -58,21 +65,21 @@ export default class BlackholeScene extends World {
         this.gui = this.exp.helpers.GUI
 
         this.uniforms = {
-            uCamPos: { value: new THREE.Vector3() },
-            uCamRight: { value: new THREE.Vector3(1, 0, 0) },
-            uCamUp: { value: new THREE.Vector3(0, 1, 0) },
-            uCamForward: { value: new THREE.Vector3(0, 0, -1) },
-            uTanFov: { value: 0.4 },
-            uAspect: { value: this.exp.sizes.width / this.exp.sizes.height },
-            uTime: { value: 0 },
-            uAudioVolume: { value: 0 },
-            uKick: { value: 0 },
-            uRs: { value: this.blackHoleParams.rs },
-            uDiskInner: { value: this.blackHoleParams.diskInner },
-            uDiskOuter: { value: this.blackHoleParams.diskOuter },
-            uCenter: { value: new THREE.Vector3(this.blackHoleParams.centerX, this.blackHoleParams.centerY, this.blackHoleParams.centerZ) },
-            uBgColor: { value: new THREE.Color(this.blackHoleParams.bgColor) },
-            uDiskColor: { value: new THREE.Color(this.blackHoleParams.diskColor) },
+            uCamPos: uniform(new THREE.Vector3()),
+            uCamRight: uniform(new THREE.Vector3(1, 0, 0)),
+            uCamUp: uniform(new THREE.Vector3(0, 1, 0)),
+            uCamForward: uniform(new THREE.Vector3(0, 0, -1)),
+            uTanFov: uniform(0.4),
+            uAspect: uniform(this.exp.sizes.width / this.exp.sizes.height),
+            uTime: uniform(0),
+            uAudioVolume: uniform(0),
+            uKick: uniform(0),
+            uRs: uniform(this.blackHoleParams.rs),
+            uDiskInner: uniform(this.blackHoleParams.diskInner),
+            uDiskOuter: uniform(this.blackHoleParams.diskOuter),
+            uCenter: uniform(new THREE.Vector3(this.blackHoleParams.centerX, this.blackHoleParams.centerY, this.blackHoleParams.centerZ)),
+            uBgColor: uniform(new THREE.Color(this.blackHoleParams.bgColor)),
+            uDiskColor: uniform(new THREE.Color(this.blackHoleParams.diskColor)),
         }
 
         this.createBlackHoleMaterial()
@@ -81,182 +88,150 @@ export default class BlackholeScene extends World {
     }
 
     private createBlackHoleMaterial() {
-        this.material = new THREE.ShaderMaterial({
-            uniforms: this.uniforms,
-            depthTest: false,
-            depthWrite: false,
-            vertexShader: `
-                varying vec2 vUv;
-                void main() {
-                    vUv = uv;
-                    gl_Position = vec4(position.xy, 0.9999, 1.0);
-                }
-            `,
-            fragmentShader: `
-                varying vec2 vUv;
+        const u = this.uniforms
 
-                uniform vec3 uCamPos;
-                uniform vec3 uCamRight;
-                uniform vec3 uCamUp;
-                uniform vec3 uCamForward;
-                uniform float uTanFov;
-                uniform float uAspect;
-                uniform float uTime;
-                uniform float uAudioVolume;
-                uniform float uKick;
-                uniform float uRs;
-                uniform float uDiskInner;
-                uniform float uDiskOuter;
-                uniform vec3 uCenter;
-                uniform vec3 uBgColor;
-                uniform vec3 uDiskColor;
+        const fbm = (p: any) => {
+            // 5 octaves, freq *= 2.05, amp *= 0.55 (unrolled)
+            let sum: any = float(0.0)
+            let amp = 0.5
+            let freq = 1.0
+            for (let i = 0; i < 5; i++) {
+                sum = sum.add(snoise3(p.mul(freq)).mul(amp))
+                freq *= 2.05
+                amp *= 0.55
+            }
+            return sum
+        }
 
-                ${simplex3D}
+        const hash1 = (n: any) => fract(sin(n).mul(43758.5453123))
 
-                float fbm(vec3 p) {
-                    float amp = 0.5;
-                    float freq = 1.0;
-                    float sum = 0.0;
-                    for (int i = 0; i < 5; i++) {
-                        sum += amp * snoise(p * freq);
-                        freq *= 2.05;
-                        amp *= 0.55;
-                    }
-                    return sum;
-                }
+        const hash3 = (p: any) => {
+            const s = dot(p, vec3(127.1, 311.7, 74.7))
+            return vec3(hash1(s), hash1(s.add(19.19)), hash1(s.add(71.71)))
+        }
 
-                float hash1(float n) {
-                    return fract(sin(n) * 43758.5453123);
-                }
+        const blackbody = (t01: any) => {
+            const c0 = vec3(0.35, 0.05, 0.02)
+            const c1 = vec3(1.0, 0.35, 0.08)
+            const c2 = vec3(1.0, 0.82, 0.5)
+            const c3 = vec3(0.82, 0.9, 1.0)
 
-                vec3 hash3(vec3 p) {
-                    float s = dot(p, vec3(127.1, 311.7, 74.7));
-                    return vec3(hash1(s), hash1(s + 19.19), hash1(s + 71.71));
-                }
+            const t = clamp(t01, 0.0, 1.0)
+            const col1 = mix(c0, c1, smoothstep(0.0, 0.35, t))
+            const col2 = mix(col1, c2, smoothstep(0.35, 0.72, t))
+            return mix(col2, c3, smoothstep(0.72, 1.0, t))
+        }
 
-                vec3 blackbody(float t01) {
-                    vec3 c0 = vec3(0.35, 0.05, 0.02);
-                    vec3 c1 = vec3(1.0, 0.35, 0.08);
-                    vec3 c2 = vec3(1.0, 0.82, 0.5);
-                    vec3 c3 = vec3(0.82, 0.9, 1.0);
+        const starfield = (dir: any) => {
+            const d = dir.mul(420.0)
+            const cell = floor(d)
+            const h = hash3(cell)
 
-                    float t = clamp(t01, 0.0, 1.0);
-                    vec3 col = mix(c0, c1, smoothstep(0.0, 0.35, t));
-                    col = mix(col, c2, smoothstep(0.35, 0.72, t));
-                    col = mix(col, c3, smoothstep(0.72, 1.0, t));
-                    return col;
-                }
+            const isStar = step(0.9965, h.x)
+            const brightness = pow(h.y, 24.0).mul(isStar).mul(3.0)
+            const starColor = mix(vec3(0.65, 0.75, 1.0), vec3(1.0, 0.86, 0.65), h.z)
 
-                vec3 starfield(vec3 dir) {
-                    vec3 d = dir * 420.0;
-                    vec3 cell = floor(d);
-                    vec3 h = hash3(cell);
+            const neb = fbm(dir.mul(2.2))
+            const nebColor = mix(vec3(0.015, 0.015, 0.03), vec3(0.09, 0.05, 0.16), clamp(neb.mul(0.5).add(0.5), 0.0, 1.0))
 
-                    float isStar = step(0.9965, h.x);
-                    float brightness = pow(h.y, 24.0) * isStar * 3.0;
-                    vec3 starColor = mix(vec3(0.65, 0.75, 1.0), vec3(1.0, 0.86, 0.65), h.z);
+            return starColor.mul(brightness).add(nebColor)
+        }
 
-                    float neb = fbm(dir * 2.2);
-                    vec3 nebColor = mix(vec3(0.015, 0.015, 0.03), vec3(0.09, 0.05, 0.16), clamp(neb * 0.5 + 0.5, 0.0, 1.0));
+        const fragment = Fn(() => {
+            const vUv = uv()
+            const ndc = vUv.mul(2.0).sub(1.0)
 
-                    return starColor * brightness + nebColor;
-                }
+            const rayDir = normalize(
+                u.uCamForward
+                    .add(u.uCamRight.mul(ndc.x.mul(u.uTanFov).mul(u.uAspect)))
+                    .add(u.uCamUp.mul(ndc.y.mul(u.uTanFov)))
+            )
 
-                void main() {
-                    vec2 ndc = vUv * 2.0 - 1.0;
+            // Mutable ray state. Everything that is derived from `pos` / `dir`
+            // and must keep its value while they change is pinned with
+            // .toVar() (see the note in Renderer.buildPipeline).
+            const pos = u.uCamPos.sub(u.uCenter).toVar()
+            const dir = rayDir.toVar()
 
-                    vec3 rayDir = normalize(
-                        uCamForward
-                        + uCamRight * (ndc.x * uTanFov * uAspect)
-                        + uCamUp * (ndc.y * uTanFov)
-                    );
+            const hVec = cross(pos, dir)
+            const h2 = dot(hVec, hVec).toVar()
 
-                    vec3 pos = uCamPos - uCenter;
-                    vec3 dir = rayDir;
+            const outColor = vec3(0.0).toVar()
+            const accAlpha = float(0.0).toVar()
+            const captured = float(0.0).toVar()
 
-                    vec3 hVec = cross(pos, dir);
-                    float h2 = dot(hVec, hVec);
+            Loop(220, () => {
+                const r = length(pos).toVar()
+                const dt = clamp(r.mul(0.035), 0.006, 0.35).toVar()
 
-                    vec3 outColor = vec3(0.0);
-                    float accAlpha = 0.0;
-                    float captured = 0.0;
+                const prevPos = pos.toVar()
 
-                    for (int i = 0; i < 220; i++) {
+                const acc = pos.mul(h2.mul(-1.5).mul(u.uRs).div(pow(max(r, 0.05), 5.0)))
+                dir.addAssign(acc.mul(dt))
+                pos.addAssign(dir.mul(dt))
 
-                        float r = length(pos);
-                        float dt = clamp(r * 0.035, 0.006, 0.35);
+                const py0 = prevPos.y
+                const py1 = pos.y
 
-                        vec3 prevPos = pos;
+                If(py0.mul(py1).lessThan(0.0).and(accAlpha.lessThan(0.98)), () => {
+                    const tHit = py0.div(py0.sub(py1))
+                    const hitPos = mix(prevPos, pos, tHit)
+                    const rHit = length(hitPos.xz)
 
-                        vec3 acc = pos * (h2 * -1.5 * uRs / pow(max(r, 0.05), 5.0));
-                        dir += acc * dt;
-                        pos += dir * dt;
+                    If(rHit.greaterThan(u.uDiskInner).and(rHit.lessThan(u.uDiskOuter)), () => {
+                        const norm = clamp(rHit.sub(u.uDiskInner).div(u.uDiskOuter.sub(u.uDiskInner)), 0.0, 1.0)
+                        const temp = pow(float(1.0).sub(norm), 0.65)
 
-                        float py0 = prevPos.y;
-                        float py1 = pos.y;
+                        const phi = atan(hitPos.z, hitPos.x)
+                        const omega = pow(max(rHit, 0.3), -1.5).mul(2.2).mul(u.uAudioVolume.mul(0.8).add(1.0))
+                        const angle = phi.sub(omega.mul(u.uTime))
 
-                        if (py0 * py1 < 0.0 && accAlpha < 0.98) {
+                        const turbP = vec3(cos(angle).mul(rHit), sin(angle).mul(rHit), u.uTime.mul(0.06))
+                        const turb = fbm(turbP.mul(0.9))
 
-                            float tHit = py0 / (py0 - py1);
-                            vec3 hitPos = mix(prevPos, pos, tHit);
-                            float rHit = length(hitPos.xz);
+                        const density = smoothstep(0.0, 0.12, norm)
+                            .mul(smoothstep(1.0, 0.8, norm))
+                            .mul(clamp(turb.mul(0.5).add(0.55), 0.0, 1.0))
 
-                            if (rHit > uDiskInner && rHit < uDiskOuter) {
+                        const tangent = normalize(vec3(hitPos.z.negate(), 0.0, hitPos.x))
+                        const beta = clamp(sqrt(u.uRs.mul(0.5).div(max(rHit, 0.35))), 0.0, 0.94)
+                        const viewDir = normalize(dir.negate())
+                        const cosA = dot(tangent, viewDir)
+                        const gamma = float(1.0).div(sqrt(max(float(1.0).sub(beta.mul(beta)), 0.001)))
+                        const dopp = float(1.0).div(max(gamma.mul(float(1.0).sub(beta.mul(cosA))), 0.05))
+                        const beaming = clamp(pow(dopp, 3.0), 0.0, 6.0)
 
-                                float norm = clamp((rHit - uDiskInner) / (uDiskOuter - uDiskInner), 0.0, 1.0);
-                                float temp = pow(1.0 - norm, 0.65);
+                        const redshift = sqrt(clamp(float(1.0).sub(u.uRs.div(max(rHit, 0.35))), 0.05, 1.0))
 
-                                float phi = atan(hitPos.z, hitPos.x);
-                                float omega = pow(max(rHit, 0.3), -1.5) * 2.2 * (1.0 + uAudioVolume * 0.8);
-                                float angle = phi - omega * uTime;
+                        const audioBoost = float(1.0).add(u.uAudioVolume.mul(1.6)).add(u.uKick.mul(1.4))
+                        const diskCol = blackbody(temp).mul(u.uDiskColor).mul(beaming).mul(redshift).mul(density).mul(1.5).mul(audioBoost)
 
-                                vec3 turbP = vec3(cos(angle) * rHit, sin(angle) * rHit, uTime * 0.06);
-                                float turb = fbm(turbP * 0.9);
+                        outColor.addAssign(diskCol.mul(float(1.0).sub(accAlpha)))
+                        accAlpha.assign(clamp(accAlpha.add(density.mul(0.85)), 0.0, 1.0))
+                    })
+                })
 
-                                float density = smoothstep(0.0, 0.12, norm)
-                                    * smoothstep(1.0, 0.8, norm)
-                                    * clamp(turb * 0.5 + 0.55, 0.0, 1.0);
+                If(r.lessThan(u.uRs.mul(1.02)), () => {
+                    captured.assign(1.0)
+                    Break()
+                })
 
-                                vec3 tangent = normalize(vec3(-hitPos.z, 0.0, hitPos.x));
-                                float beta = clamp(sqrt(uRs * 0.5 / max(rHit, 0.35)), 0.0, 0.94);
-                                vec3 viewDir = normalize(-dir);
-                                float cosA = dot(tangent, viewDir);
-                                float gamma = 1.0 / sqrt(max(1.0 - beta * beta, 0.001));
-                                float dopp = 1.0 / max(gamma * (1.0 - beta * cosA), 0.05);
-                                float beaming = clamp(pow(dopp, 3.0), 0.0, 6.0);
+                If(r.greaterThan(80.0), () => {
+                    Break()
+                })
+            })
 
-                                float redshift = sqrt(clamp(1.0 - uRs / max(rHit, 0.35), 0.05, 1.0));
+            const bg = starfield(dir).mul(u.uBgColor).mul(float(1.0).sub(captured)).mul(u.uKick.mul(0.5).add(1.0))
+            const finalColor = outColor.add(bg.mul(float(1.0).sub(accAlpha)))
 
-                                float audioBoost = 1.0 + uAudioVolume * 1.6 + uKick * 1.4;
-                                vec3 diskCol = blackbody(temp) * uDiskColor * beaming * redshift * density * 1.5 * audioBoost;
-
-                                outColor += diskCol * (1.0 - accAlpha);
-                                accAlpha = clamp(accAlpha + density * 0.85, 0.0, 1.0);
-
-                            }
-
-                        }
-
-                        if (r < uRs * 1.02) {
-                            captured = 1.0;
-                            break;
-                        }
-
-                        if (r > 80.0) {
-                            break;
-                        }
-
-                    }
-
-                    vec3 bg = starfield(dir) * uBgColor * (1.0 - captured) * (1.0 + uKick * 0.5);
-                    vec3 finalColor = outColor + bg * (1.0 - accAlpha);
-
-                    gl_FragColor = vec4(finalColor, 1.0);
-                    #include <tonemapping_fragment>
-                    #include <colorspace_fragment>
-                }
-            `
+            return vec4(finalColor, 1.0)
         })
+
+        this.material = new NodeMaterial()
+        this.material.depthTest = false
+        this.material.depthWrite = false
+        this.material.vertexNode = vec4(positionGeometry.xy, 0.9999, 1.0)
+        this.material.fragmentNode = fragment()
     }
 
     private createBlackHoleMesh() {

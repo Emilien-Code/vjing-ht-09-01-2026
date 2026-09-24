@@ -1,4 +1,4 @@
-import * as THREE from "three"
+import * as THREE from 'three/webgpu'
 import Renderer from "./utils/Renderer";
 import Camera from "./utils/Camera";
 import Sizes from "./utils/Sizes";
@@ -136,7 +136,7 @@ export default class Experience {
         this.sizes.viewHeight = Math.tan(this.camera.instance.fov * Math.PI / 180 / 2) * this.camera.instance.position.z * 2;
     }
     public update(): void {
-        if (this.isReady && this.isAudioLoaded) {
+        if (this.isReady && this.isAudioLoaded && this.renderer.initialized) {
             const dt = Math.min(this.time.delta * 0.001, 0.1)
             this.audioManager?.update()
             this.bpmManager?.update(dt)

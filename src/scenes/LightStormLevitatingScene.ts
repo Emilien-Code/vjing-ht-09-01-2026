@@ -4,7 +4,7 @@ import LightStorm from "../components/LightStorm"
 import LevitatingBody from "../components/LevitatingBody"
 import Water from "../components/Water"
 import GUI from "lil-gui"
-import * as THREE from "three"
+import * as THREE from 'three/webgpu'
 
 export default class LightStormLevitatingScene extends World {
 

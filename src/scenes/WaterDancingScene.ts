@@ -3,97 +3,10 @@ import World from "../classes/World"
 import Water from "../components/Water"
 import DancingBody from "../components/DancingBody"
 import GUI from "lil-gui"
-import * as THREE from "three"
+import * as THREE from 'three/webgpu'
+import { uniform } from 'three/tsl'
+import { createNoiseSurfaceMaterial } from "../tsl/noiseSurface"
 
-const cnoise = `
-
-
-// Classic Perlin 3D Noise
-// by Stefan Gustavson
-//
-vec4 permute(vec4 x)
-{
-    return mod(((x*34.0)+1.0)*x, 289.0);
-}
-vec4 taylorInvSqrt(vec4 r)
-{
-    return 1.79284291400159 - 0.85373472095314 * r;
-}
-vec3 fade(vec3 t)
-{
-    return t*t*t*(t*(t*6.0-15.0)+10.0);
-}
-
-float cnoise(vec3 P)
-{
-    vec3 Pi0 = floor(P); // Integer part for indexing
-    vec3 Pi1 = Pi0 + vec3(1.0); // Integer part + 1
-    Pi0 = mod(Pi0, 289.0);
-    Pi1 = mod(Pi1, 289.0);
-    vec3 Pf0 = fract(P); // Fractional part for interpolation
-    vec3 Pf1 = Pf0 - vec3(1.0); // Fractional part - 1.0
-    vec4 ix = vec4(Pi0.x, Pi1.x, Pi0.x, Pi1.x);
-    vec4 iy = vec4(Pi0.yy, Pi1.yy);
-    vec4 iz0 = Pi0.zzzz;
-    vec4 iz1 = Pi1.zzzz;
-
-    vec4 ixy = permute(permute(ix) + iy);
-    vec4 ixy0 = permute(ixy + iz0);
-    vec4 ixy1 = permute(ixy + iz1);
-
-    vec4 gx0 = ixy0 / 7.0;
-    vec4 gy0 = fract(floor(gx0) / 7.0) - 0.5;
-    gx0 = fract(gx0);
-    vec4 gz0 = vec4(0.5) - abs(gx0) - abs(gy0);
-    vec4 sz0 = step(gz0, vec4(0.0));
-    gx0 -= sz0 * (step(0.0, gx0) - 0.5);
-    gy0 -= sz0 * (step(0.0, gy0) - 0.5);
-
-    vec4 gx1 = ixy1 / 7.0;
-    vec4 gy1 = fract(floor(gx1) / 7.0) - 0.5;
-    gx1 = fract(gx1);
-    vec4 gz1 = vec4(0.5) - abs(gx1) - abs(gy1);
-    vec4 sz1 = step(gz1, vec4(0.0));
-    gx1 -= sz1 * (step(0.0, gx1) - 0.5);
-    gy1 -= sz1 * (step(0.0, gy1) - 0.5);
-
-    vec3 g000 = vec3(gx0.x,gy0.x,gz0.x);
-    vec3 g100 = vec3(gx0.y,gy0.y,gz0.y);
-    vec3 g010 = vec3(gx0.z,gy0.z,gz0.z);
-    vec3 g110 = vec3(gx0.w,gy0.w,gz0.w);
-    vec3 g001 = vec3(gx1.x,gy1.x,gz1.x);
-    vec3 g101 = vec3(gx1.y,gy1.y,gz1.y);
-    vec3 g011 = vec3(gx1.z,gy1.z,gz1.z);
-    vec3 g111 = vec3(gx1.w,gy1.w,gz1.w);
-
-    vec4 norm0 = taylorInvSqrt(vec4(dot(g000, g000), dot(g010, g010), dot(g100, g100), dot(g110, g110)));
-    g000 *= norm0.x;
-    g010 *= norm0.y;
-    g100 *= norm0.z;
-    g110 *= norm0.w;
-    vec4 norm1 = taylorInvSqrt(vec4(dot(g001, g001), dot(g011, g011), dot(g101, g101), dot(g111, g111)));
-    g001 *= norm1.x;
-    g011 *= norm1.y;
-    g101 *= norm1.z;
-    g111 *= norm1.w;
-
-    float n000 = dot(g000, Pf0);
-    float n100 = dot(g100, vec3(Pf1.x, Pf0.yz));
-    float n010 = dot(g010, vec3(Pf0.x, Pf1.y, Pf0.z));
-    float n110 = dot(g110, vec3(Pf1.xy, Pf0.z));
-    float n001 = dot(g001, vec3(Pf0.xy, Pf1.z));
-    float n101 = dot(g101, vec3(Pf1.x, Pf0.y, Pf1.z));
-    float n011 = dot(g011, vec3(Pf0.x, Pf1.yz));
-    float n111 = dot(g111, Pf1);
-
-    vec3 fade_xyz = fade(Pf0);
-    vec4 n_z = mix(vec4(n000, n100, n010, n110), vec4(n001, n101, n011, n111), fade_xyz.z);
-    vec2 n_yz = mix(n_z.xy, n_z.zw, fade_xyz.y);
-    float n_xyz = mix(n_yz.x, n_yz.y, fade_xyz.x);
-    return 2.2 * n_xyz;
-}
-
-`
 
 export default class WaterDancingScene extends World {
 
@@ -113,8 +26,8 @@ export default class WaterDancingScene extends World {
 
     private floorGeo!: THREE.PlaneGeometry
     private floorMesh!: THREE.Mesh
-    private floorMat!: THREE.ShaderMaterial
-    private floorUniforms: { [key: string]: THREE.IUniform }
+    private floorMat!: THREE.NodeMaterial
+    private floorUniforms: Record<string, any>
     private floorGuiFolder!: GUI
     private floorParams = {
         noiseScale: 100,
@@ -162,24 +75,24 @@ export default class WaterDancingScene extends World {
         this.dancingBody = new DancingBody(exp)
 
         this.floorUniforms = {
-            uTime: { value: 0 },
-            uNoiseScale: { value: this.floorParams.noiseScale },
-            uElevation: { value: this.floorParams.elevation },
-            uElevationIntensity: { value: this.floorParams.elevationIntensity },
-            uColor1: { value: new THREE.Color(this.floorParams.color1) },
-            uColor2: { value: new THREE.Color(this.floorParams.color2) },
-            uColor3: { value: new THREE.Color(this.floorParams.color3) },
-            uGrainAmount: { value: this.floorParams.grainAmount },
-            uGrainDensity: { value: this.floorParams.grainDensity },
-            uLeftFootPos: { value: new THREE.Vector3() },
-            uRightFootPos: { value: new THREE.Vector3() },
-            uFootTouchL: { value: 0 },
-            uFootTouchR: { value: 0 },
-            uLeftFootRadius: { value: this.floorParams.footBaseRadius },
-            uRightFootRadius: { value: this.floorParams.footBaseRadius },
-            uFootBumpHeight: { value: this.floorParams.footBumpHeight },
-            uBodyCirclePos: { value: new THREE.Vector3() },
-            uBodyCircleRadius: { value: this.floorParams.bodyCircleRadius },
+            uTime: uniform(0),
+            uNoiseScale: uniform(this.floorParams.noiseScale),
+            uElevation: uniform(this.floorParams.elevation),
+            uElevationIntensity: uniform(this.floorParams.elevationIntensity),
+            uColor1: uniform(new THREE.Color(this.floorParams.color1)),
+            uColor2: uniform(new THREE.Color(this.floorParams.color2)),
+            uColor3: uniform(new THREE.Color(this.floorParams.color3)),
+            uGrainAmount: uniform(this.floorParams.grainAmount),
+            uGrainDensity: uniform(this.floorParams.grainDensity),
+            uLeftFootPos: uniform(new THREE.Vector3()),
+            uRightFootPos: uniform(new THREE.Vector3()),
+            uFootTouchL: uniform(0),
+            uFootTouchR: uniform(0),
+            uLeftFootRadius: uniform(this.floorParams.footBaseRadius),
+            uRightFootRadius: uniform(this.floorParams.footBaseRadius),
+            uFootBumpHeight: uniform(this.floorParams.footBumpHeight),
+            uBodyCirclePos: uniform(new THREE.Vector3()),
+            uBodyCircleRadius: uniform(this.floorParams.bodyCircleRadius),
         }
 
         this.setupPath()
@@ -191,147 +104,7 @@ export default class WaterDancingScene extends World {
     private createFloor() {
         this.floorGeo = new THREE.PlaneGeometry(40, 40, 256, 256)
 
-        this.floorMat = new THREE.ShaderMaterial({
-            wireframe: false,
-            uniforms: this.floorUniforms,
-            vertexShader: `
-            uniform float uTime;
-            uniform float uElevation;
-            uniform float uNoiseScale;
-
-            uniform vec3 uColor1;
-            uniform vec3 uColor2;
-            uniform vec3 uColor3;
-
-            uniform vec3 uLeftFootPos;
-            uniform vec3 uRightFootPos;
-            uniform float uFootTouchL;
-            uniform float uFootTouchR;
-            uniform float uLeftFootRadius;
-            uniform float uRightFootRadius;
-            uniform float uFootBumpHeight;
-
-            varying float vElevation;
-            varying float vNoise;
-            varying float vFof;
-            varying vec3 vNormal;
-            varying vec3 vColor;
-            varying vec3 vWorldPos;
-
-            ${cnoise}
-
-            float exponentialIn(float t) {
-  return t == 0.0 ? t : pow(2.0, 10.0 * (t - 1.0));
-}
-
-            void main()
-            {
-                vec4 modelPosition = modelMatrix * vec4(position, 1.0);
-
-
-                //FRESNEL
-                vec3 viewDirection = normalize(modelPosition.xyz - cameraPosition);
-                float fresnel = dot(viewDirection, normal) + 1.0;
-                // fresnel = pow(fresnel, 10.0);
-
-
-                float noiseValue = cnoise(vec3(modelPosition.xz * 200000.0, uTime * 0.5));
-                vec3 displaced = normalize(normal) * exponentialIn(noiseValue) * fresnel * uElevation;
-
-                //FOOTSTEPS
-                float footDistL = length(modelPosition.xz - uLeftFootPos.xz);
-                float footDistR = length(modelPosition.xz - uRightFootPos.xz);
-                float footGlowL = uFootTouchL * smoothstep(uLeftFootRadius, 0.0, footDistL);
-                float footGlowR = uFootTouchR * smoothstep(uRightFootRadius, 0.0, footDistR);
-                float footGlow = clamp(footGlowL + footGlowR, 0.0, 1.0);
-                displaced += normalize(normal) * footGlow * uFootBumpHeight;
-
-                 modelPosition.xyz += displaced;
-
-                vNoise = noiseValue;
-                vElevation = noiseValue * fresnel;
-                vNormal = normalize(position);
-                vWorldPos = modelPosition.xyz;
-
-
-
-
-                vFof = fresnel;
-
-
-
-                float color_noise_value = cnoise(vec3(modelPosition * .5 + uTime *0.2));
-
-                vec3 colorLow  = mix(uColor1, uColor2, color_noise_value);
-                vec3 colorHigh = mix(uColor2, uColor3, color_noise_value);
-                vec3 color = mix(colorLow, colorHigh, color_noise_value);
-
-                vColor = color;
-
-
-                vec4 viewPosition = viewMatrix * modelPosition;
-                vec4 projectedPosition = projectionMatrix * viewPosition;
-                gl_Position = projectedPosition;
-            }
-            `,
-            fragmentShader: `
-            uniform float uTime;
-            uniform float uElevationIntensity;
-            uniform vec3 uColor1;
-            uniform vec3 uColor2;
-            uniform vec3 uColor3;
-            uniform float uGrainAmount;
-            uniform float uGrainDensity;
-            uniform vec3 uLeftFootPos;
-            uniform vec3 uRightFootPos;
-            uniform float uFootTouchL;
-            uniform float uFootTouchR;
-            uniform float uLeftFootRadius;
-            uniform float uRightFootRadius;
-            uniform vec3 uBodyCirclePos;
-            uniform float uBodyCircleRadius;
-
-            varying float vElevation;
-            varying float vNoise;
-            varying vec3 vNormal;
-            varying float vFof;
-            varying vec3 vColor;
-            varying vec3 vWorldPos;
-
-            float randd(vec2 co) {
-                return fract(sin(dot(co.xy, vec2(12.9898, 78.233))) * 43758.5453);
-            }
-
-            void main() {
-
-                float brightness = 1.0 + vElevation * uElevationIntensity;
-                vec3 noiseColor = clamp(vColor * brightness, 0.0, 1.0);
-
-                float resolution = 1.0 / uGrainDensity;
-                vec2 uv = gl_FragCoord.xy + uTime ;
-                vec2 lowresxy = vec2(floor(uv.x / resolution), floor(uv.y / resolution));
-                float grain = randd(lowresxy) * 2.0 - 1.0;
-                noiseColor = clamp(noiseColor + grain * uGrainAmount, 0.0, 1.0);
-
-                //FOOTSTEPS (per-pixel so the glow stays smooth regardless of mesh resolution)
-                float footDistL = length(vWorldPos.xz - uLeftFootPos.xz);
-                float footDistR = length(vWorldPos.xz - uRightFootPos.xz);
-                float footGlowL = uFootTouchL * smoothstep(uLeftFootRadius, 0.0, footDistL);
-                float footGlowR = uFootTouchR * smoothstep(uRightFootRadius, 0.0, footDistR);
-
-                //BODY CIRCLE (same reveal technique, always on, centered under the body)
-                float bodyDist = length(vWorldPos.xz - uBodyCirclePos.xz);
-                float bodyGlow = smoothstep(uBodyCircleRadius, 0.0, bodyDist);
-
-                float footGlow = clamp(footGlowL + footGlowR + bodyGlow, 0.0, 1.0);
-
-                vec3 color = mix(vec3(0.0), noiseColor, footGlow);
-
-                gl_FragColor = vec4(color, 1.0);
-                #include <colorspace_fragment>
-            }
-            `
-        })
+        this.floorMat = createNoiseSurfaceMaterial(this.floorUniforms, { footsteps: true })
 
         this.floorMesh = new THREE.Mesh(this.floorGeo, this.floorMat)
         this.floorMesh.rotation.x = -Math.PI / 2

@@ -1,5 +1,7 @@
-import * as THREE from 'three';
-import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
+import * as THREE from 'three/webgpu';
+import {
+    Fn, If, uniform, texture, float, vec2, vec3, vec4, floor, clamp, dot,
+} from 'three/tsl';
 
 const CHARSET = ' .:-=+*#@%';
 
@@ -21,75 +23,89 @@ function createCharsetTexture(chars: string): THREE.CanvasTexture {
     const texture = new THREE.CanvasTexture(canvas);
     texture.magFilter = THREE.LinearFilter;
     texture.minFilter = THREE.LinearFilter;
+    // No mip chain: with WebGL, LinearFilter alone meant "no mipmaps", but the
+    // WebGPU backend still builds them (and the glyphs get blurry when a
+    // 64px glyph is squeezed into a ~4-10px cell).
+    texture.generateMipmaps = false;
     return texture;
 }
 
-const AsciiShader = {
-    uniforms: {
-        tDiffuse: { value: null as THREE.Texture | null },
-        tCharset: { value: null as THREE.Texture | null },
-        resolution: { value: new THREE.Vector2(1, 1) },
-        cellSize: { value: 4.0 },
-        numChars: { value: CHARSET.length },
-    },
-    vertexShader: /* glsl */`
-        varying vec2 vUv;
-        void main() {
-            vUv = uv;
-            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-        }
-    `,
-    fragmentShader: /* glsl */`
-        uniform sampler2D tDiffuse;
-        uniform sampler2D tCharset;
-        uniform vec2 resolution;
-        uniform float cellSize;
-        uniform float numChars;
-        varying vec2 vUv;
+// ASCII-art post effect: the screen is cut into `cellSize`-pixel cells, each
+// cell's luminance picks a glyph from CHARSET, and the glyph mask darkens the
+// cell's colour.
+//
+// Unlike the old ShaderPass this isn't a pass with its own render target: it
+// builds a TSL function of `uv` (see Renderer.ts) that pulls the cell-centre
+// colour from whatever stage comes before it, and is switched on/off through
+// the `enabled` uniform.
+export class AsciiPass {
+    private uEnabled = uniform(0);
+    private uCellSize = uniform(4.0);
+    private uResolution = uniform(new THREE.Vector2(1, 1));
+    private charset = createCharsetTexture(CHARSET);
 
-        float lu(vec3 c) {
-            return dot(c, vec3(0.299, 0.587, 0.114));
-        }
-
-        void main() {
-            vec2 cellSizeUV = vec2(cellSize) / resolution;
-            vec2 cellOrigin = floor(vUv / cellSizeUV) * cellSizeUV;
-            vec2 cellCenter = cellOrigin + cellSizeUV * 0.5;
-            vec4 cellColor = texture2D(tDiffuse, cellCenter);
-
-            float lum = lu(cellColor.rgb);
-            float charIdx = clamp(floor(lum * numChars), 0.0, numChars - 1.0);
-
-            vec2 charCellUV = (vUv - cellOrigin) / cellSizeUV;
-            vec2 charUV = vec2(
-                (charIdx + charCellUV.x) / numChars,
-                charCellUV.y
-            );
-            float charMask = texture2D(tCharset, charUV).r;
-
-            gl_FragColor = vec4(cellColor.rgb * charMask, 1.0);
-        }
-    `,
-};
-
-export class AsciiPass extends ShaderPass {
     constructor(width: number, height: number) {
-        super(AsciiShader);
-        this.uniforms['tCharset'].value = createCharsetTexture(CHARSET);
-        this.uniforms['resolution'].value.set(width, height);
-        this.uniforms['numChars'].value = CHARSET.length;
-        this.enabled = false;
+        this.uResolution.value.set(width, height);
     }
 
     setSize(width: number, height: number) {
-        this.uniforms['resolution'].value.set(width, height);
+        this.uResolution.value.set(width, height);
+    }
+
+    get enabled(): boolean {
+        return this.uEnabled.value > 0.5;
+    }
+
+    set enabled(v: boolean) {
+        this.uEnabled.value = v ? 1 : 0;
     }
 
     get cellSize(): number {
-        return this.uniforms['cellSize'].value;
+        return this.uCellSize.value;
     }
 
     set cellSize(v: number) {
-        this.uniforms['cellSize'].value = v;
+        this.uCellSize.value = v;
+    }
+
+    // `previous(uv)` is the image this effect reads from (a function so it can
+    // be sampled at the cell centre rather than at the pixel itself). Returns a
+    // function of `uv` that yields the ASCII image when enabled and simply
+    // forwards `previous(uv)` otherwise.
+    apply(previous: (uv: any) => any) {
+        const numChars = float(CHARSET.length);
+        const charset = this.charset;
+
+        const ascii = Fn(([uvIn]: any[]) => {
+            const uvN = uvIn.toVar();
+            const cellSizeUV = this.uCellSize.div(this.uResolution);
+            const cellOrigin = floor(uvN.div(cellSizeUV)).mul(cellSizeUV);
+            const cellCenter = cellOrigin.add(cellSizeUV.mul(0.5));
+            const cellColor = previous(cellCenter);
+
+            const lum = dot(cellColor.rgb, vec3(0.299, 0.587, 0.114));
+            const charIdx = clamp(floor(lum.mul(numChars)), 0.0, numChars.sub(1.0));
+
+            const charCellUV = uvN.sub(cellOrigin).div(cellSizeUV);
+            const charUV = vec2(
+                charIdx.add(charCellUV.x).div(numChars),
+                charCellUV.y,
+            );
+            const charMask = texture(charset, charUV).r;
+
+            return vec4(cellColor.rgb.mul(charMask), 1.0);
+        });
+
+        return Fn(([uvIn]: any[]) => {
+            // Pin the uv before branching (see Renderer.buildPipeline).
+            const uvN = uvIn.toVar();
+            const result = vec4(0.0).toVar();
+            If(this.uEnabled.greaterThan(0.5), () => {
+                result.assign(ascii(uvN));
+            }).Else(() => {
+                result.assign(previous(uvN));
+            });
+            return result;
+        });
     }
 }

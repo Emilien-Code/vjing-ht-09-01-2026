@@ -1,7 +1,11 @@
 import Experience from "../Experience"
 
-import * as THREE from "three"
+import * as THREE from 'three/webgpu'
 import GUI from "lil-gui";
+import {
+    Fn, uniform, attribute, output, positionLocal, positionGeometry, cameraPosition,
+    float, vec4, distance, select,
+} from 'three/tsl'
 import { SimplexNoise } from "../utils/noise"
 import { grassPalette, rockPalette } from "../common/colors";
 const getRandomBetween = (min: number, max: number) => Math.random() * (max - min) + min
@@ -22,7 +26,7 @@ export default class Tower {
     private dummy = new THREE.Object3D();
     public mesh: THREE.InstancedMesh
     private geometry: THREE.BoxGeometry
-    private material: THREE.MeshStandardMaterial
+    private material: THREE.MeshStandardNodeMaterial
     private scene: THREE.Scene
     private musicDurationInBlock = 400
 
@@ -41,9 +45,9 @@ export default class Tower {
     }
 
     private uniforms = {
-        uCameraPosition: { value: new THREE.Vector3() },
-        uProgress: { value: this.towerParams.appearingProgress },
-        uRadius: { value: 0 }
+        uCameraPosition: uniform(new THREE.Vector3()),
+        uProgress: uniform(this.towerParams.appearingProgress),
+        uRadius: uniform(0)
     }
 
 
@@ -76,114 +80,38 @@ export default class Tower {
         this.y = height
         this.z = base
 
-        this.material = new THREE.MeshStandardMaterial({ color: 0xffffff });
+        const u = this.uniforms
+        this.material = new THREE.MeshStandardNodeMaterial({ color: 0xffffff });
 
-        this.material.onBeforeCompile = (shader) => {
-            // STEP 1: Add uniforms
-            Object.keys(this.uniforms).forEach(key => {
-                shader.uniforms[key] = this.uniforms[key];
-            });
+        // Bricks shrink to nothing beyond `uRadius` from the camera and grow
+        // back over the outer quarter of it. The shrink has to happen about
+        // each brick's own centre, but by the time positionNode runs the
+        // instance matrix has already been applied to positionLocal — the
+        // bricks are translation-only (scale 1, no rotation), so the centre is
+        // simply `positionLocal - positionGeometry`.
+        this.material.positionNode = Fn(() => {
+            const dist = distance(positionLocal, cameraPosition)
 
-            // console.log(shader, this.material)
-            // shader.uniforms.uCameraPosition = { value: new THREE.Vector3() }
-            // shader.uniforms.uProgress = { value: this.towerParams.appearingProgress }
+            const radius = u.uRadius
+            const areaFactor = 0.25
+            const diff = radius.mul(1.0 - areaFactor)
+            const inFalloff = float(1.0).sub(dist.sub(diff).div(radius.sub(diff)))
+            const scale = select(
+                dist.lessThan(radius),
+                select(dist.greaterThan(diff), inFalloff, float(1.0)),
+                float(0.0),
+            )
+            // (snap scales just under 1 up to 1)
+            const snapped = select(scale.greaterThan(0.99).and(scale.lessThan(1.0)), float(1.0), scale)
 
-            shader.fragmentShader = 'varying vec3 vInstanceColor;\n' + shader.fragmentShader;
-            shader.vertexShader = shader.vertexShader.replace(
-                '#include <common>',
-                `
-                #include <common>
-                attribute vec3 instanceColor;
+            const center = positionLocal.sub(positionGeometry)
+            return center.add(positionGeometry.mul(snapped))
+        })()
 
-                varying vec3 vInstanceColor;
-
-                uniform float uProgress ;
-                uniform float uRadius ;
-
-                `
-            );
-            shader.vertexShader = shader.vertexShader.replace(
-                '#include <begin_vertex>',
-                `
-                #include <begin_vertex>
-                
-
-                vec4 wp = instanceMatrix * vec4(transformed, 1.0);
-
-                float dist = distance(wp.xyz, cameraPosition.xyz);
-                dist = abs( dist);
-                
-                float radius = uRadius;
-                float areaFactor = .25;
-                float areaRest = 1. - areaFactor;
-                float diff = radius * areaRest;
-                float scale = 0.;
-                float posY = 0.;
-                float PosFactor = 4.;
-                if(dist < radius ){
-                    if ( dist > radius * areaRest ) {
-                        float distT = dist - diff;
-                        float radiusT = radius - diff;
-                        scale =  1. - distT /radiusT;
-                        posY =  PosFactor - (distT /radiusT * PosFactor);
-                    } else {
-                        scale = 1.;
-                    posY = PosFactor;
-                    }
-                    if(scale >0.99 && scale<1.){
-                    scale = 1.;
-                    posY = PosFactor;
-                    }
-                } else {
-                    scale = 0.;
-                    posY = 0.;
-                    
-                }
-                
-                
-                // float delay = 1.0 - 1.0 /max(0.01, dist) * 2.; 
-//modelMatrix
-//viewMatrix
-                // transformed.y -= posY;
-                // transformed.z -= posY;
-                transformed *= scale ;//* dist * .1 ;//exp(-0.2 * dist);;//Conseil de flo : utiliser Matric
-
-                            
-                // transformed.x += 10.;
-                vInstanceColor = instanceColor;
-                `
-            );
-            shader.fragmentShader = shader.fragmentShader.replace(
-                '#include <fog_fragment>',//Target ou ce sera appliqué. targetter ailleurs pour que le fog soit quand même calculé (avant sans doute)
-                `
-                #include <fog_fragment>
-                gl_FragColor.rgb *= vInstanceColor;// Conflit avec le fog car * la valeur du fog
-                `
-            );
-        };
-
-        /*new THREE.ShaderMaterial({
-            vertexShader: `
-
-attribute vec3 instanceColor;
-varying vec3 vInstanceColor;
-            void main() {
-                vInstanceColor = instanceColor;
-
-     vec4 mvPosition = modelViewMatrix * instanceMatrix * vec4(position, 1.0);
-    gl_Position = projectionMatrix * mvPosition;
-
-            }
-    `,
-            fragmentShader: `
-                varying vec3 vInstanceColor;
-
-            void main() {
-
-                gl_FragColor = vec4(vInstanceColor, 1.0);
-            }
-            `,
-        });*/
+        // Per-brick colour, multiplied in after lighting
+        // (was `gl_FragColor.rgb *= vInstanceColor` after fog_fragment).
+        const instanceTint = attribute('instanceColor', 'vec3')
+        this.material.outputNode = vec4(output.rgb.mul(instanceTint), output.a)
 
         this.bricksColors = new Float32Array(this.x * this.y * this.z * 3 * this.towerParams.towerCount * this.towerParams.columns)
         this.geometry = new THREE.BoxGeometry(1, 1, 1);

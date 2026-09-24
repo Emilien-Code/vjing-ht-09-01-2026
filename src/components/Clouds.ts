@@ -1,60 +1,13 @@
 import Experience from "../Experience"
 
-import * as THREE from "three"
+import * as THREE from 'three/webgpu'
 import GUI from "lil-gui";
+import {
+    Fn, uniform, uv, texture, positionLocal, cameraPosition, instancedBufferAttribute,
+    float, vec4, distance, select,
+} from 'three/tsl'
 
 const getRandomBetween = (min: number, max: number) => Math.random() * (max - min) + min
-const cloudShader = {
-    vertexShader:
-        `
-        uniform float uFalloff;
-        uniform float uRadius;
-        uniform float uAreaFactor;
-
-        varying vec2 vUv;
-
-        void main() {
-          vUv = uv;
-          vec3 transformed = position;
-
-          #ifdef USE_INSTANCING
-            vec4 worldPosition = instanceMatrix * vec4( transformed, 1.0 );
-          #else
-            vec4 worldPosition = vec4( transformed, 1.0 );
-          #endif
-
-          if ( uFalloff > 0.5 ) {
-            float dist = distance( worldPosition.xyz, cameraPosition.xyz );
-            float diff = uRadius * ( 1.0 - uAreaFactor );
-            float scale = dist < uRadius
-                ? ( dist > diff ? 1.0 - ( dist - diff ) / ( uRadius - diff ) : 1.0 )
-                : 0.0;
-            transformed *= scale;
-          }
-
-          #ifdef USE_INSTANCING
-            vec4 mvPosition = modelViewMatrix * instanceMatrix * vec4( transformed, 1.0 );
-          #else
-            vec4 mvPosition = modelViewMatrix * vec4( transformed, 1.0 );
-          #endif
-
-          gl_Position = projectionMatrix * mvPosition;
-        }
-      `,
-    fragmentShader:
-        `
-        uniform sampler2D map;
-        uniform vec3 uColor;
-        uniform float uOpacity;
-
-        varying vec2 vUv;
-
-        void main() {
-          vec4 texColor = texture2D( map, vUv );
-          gl_FragColor = vec4( texColor.rgb * uColor, texColor.a * uOpacity );
-        }
-      `
-}
 export type cloudParamsType = {
     x: number, y: number, z: number,
     clouds: number,
@@ -75,7 +28,8 @@ export default class Clouds {
     private experience: Experience;
     private gui: GUI;
     private scene: THREE.Scene
-    private material: THREE.ShaderMaterial | null = null
+    private material: THREE.NodeMaterial | null = null
+    private uniforms: Record<string, any> | null = null
     private geometry: THREE.PlaneGeometry | null = null
     private mesh: THREE.InstancedMesh | null = null
     private dummy: THREE.Object3D | null = null
@@ -124,27 +78,48 @@ export default class Clouds {
             textureKey = 'cloud',
         } = this.cloudParams
 
-        const texture = this.experience.ressources.items[textureKey]
+        const texture_ = this.experience.ressources.items[textureKey]
 
-        this.material = new THREE.ShaderMaterial({
-            uniforms: {
-                map: { value: texture },
-                uColor: { value: new THREE.Color(this.cloudParams.color ?? '#ffffff') },
-                uOpacity: { value: this.cloudParams.cloudOpacity },
-                uFalloff: { value: blending === THREE.AdditiveBlending ? 1 : 0 },
-                uRadius: { value: 120 },
-                uAreaFactor: { value: 0.25 },
-            },
-            vertexShader: cloudShader.vertexShader,
-            fragmentShader: cloudShader.fragmentShader,
-            transparent: true,
-            side: THREE.DoubleSide,
-            depthWrite: false,
-            blending,
-        })
+        const u = this.uniforms = {
+            uColor: uniform(new THREE.Color(this.cloudParams.color ?? '#ffffff')),
+            uOpacity: uniform(this.cloudParams.cloudOpacity),
+            uFalloff: uniform(blending === THREE.AdditiveBlending ? 1 : 0),
+            uRadius: uniform(120),
+            uAreaFactor: uniform(0.25),
+        }
+
+        // Each instance's translation, so the distance falloff can shrink a
+        // quad about its own centre (the instance matrix has already been
+        // applied to positionLocal by the time positionNode runs).
+        const centers = new Float32Array(this.cloudParams.clouds * 3)
+        const centerAttr = new THREE.InstancedBufferAttribute(centers, 3)
+
+        const mat = new THREE.NodeMaterial()
+        const center: any = instancedBufferAttribute(centerAttr)
+        mat.positionNode = Fn(() => {
+            const dist = distance(positionLocal, cameraPosition)
+            const diff = u.uRadius.mul(float(1.0).sub(u.uAreaFactor))
+            const falloff = select(
+                dist.lessThan(u.uRadius),
+                select(dist.greaterThan(diff), float(1.0).sub(dist.sub(diff).div(u.uRadius.sub(diff))), float(1.0)),
+                float(0.0),
+            )
+            const scale = select(u.uFalloff.greaterThan(0.5), falloff, float(1.0))
+            return center.add(positionLocal.sub(center).mul(scale))
+        })()
+        mat.fragmentNode = Fn(() => {
+            const texColor = texture(texture_).sample(uv())
+            return vec4(texColor.rgb.mul(u.uColor), texColor.a.mul(u.uOpacity))
+        })()
+        mat.transparent = true
+        mat.side = THREE.DoubleSide
+        mat.depthWrite = false
+        mat.blending = blending
+        this.material = mat
 
         this.dummy = new THREE.Object3D()
         this.geometry = new THREE.PlaneGeometry(1, 1, 1)
+        this.geometry.setAttribute('aCenter', centerAttr)
         this.mesh = new THREE.InstancedMesh(this.geometry, this.material, this.cloudParams.clouds)
         this.mesh.position.set(this.cloudParams.x, this.cloudParams.y, this.cloudParams.z)
 
@@ -170,6 +145,9 @@ export default class Clouds {
             this.dummy.scale.set(scale, scale * scaleAspect, scale)
             this.dummy.updateMatrix()
             this.mesh.setMatrixAt(i, this.dummy.matrix)
+            centers[i * 3] = this.dummy.position.x
+            centers[i * 3 + 1] = this.dummy.position.y
+            centers[i * 3 + 2] = this.dummy.position.z
         }
 
         this.addScene()
@@ -214,14 +192,14 @@ export default class Clouds {
             'cloudOpacity',
             0, 1, 0.01
         ).onChange((e: number) => {
-            this.material && (this.material.uniforms.uOpacity.value = e)
+            this.uniforms && (this.uniforms.uOpacity.value = e)
         })
 
         towerFolder.addColor(
             this.cloudParams,
             'color'
         ).onChange((e: THREE.ColorRepresentation) => {
-            this.material && this.material.uniforms.uColor.value.set(e)
+            this.uniforms && this.uniforms.uColor.value.set(e)
         })
 
 
@@ -251,7 +229,7 @@ export default class Clouds {
     setVisible(v: boolean) {
         this.visible = v
         this.mesh && (this.mesh.visible = v)
-        this.material && (this.material.uniforms.uOpacity.value = v ? this.cloudParams.cloudOpacity : 0)
+        this.uniforms && (this.uniforms.uOpacity.value = v ? this.cloudParams.cloudOpacity : 0)
     }
 
     showGUI(v: boolean) {
@@ -290,6 +268,7 @@ export default class Clouds {
         this.mesh = null
         this.geometry = null
         this.material = null
+        this.uniforms = null
     }
 
     reconfigure(params: Omit<cloudParamsType, 'scaleFactor'>) {

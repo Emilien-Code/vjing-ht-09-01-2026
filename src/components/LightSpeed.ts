@@ -1,8 +1,9 @@
-import * as THREE from "three"
+import * as THREE from 'three/webgpu'
 import Experience from "../Experience"
+import {
+    Fn, uniform, attribute, float, vec3, vec4, fract, abs, clamp, mix, select,
+} from 'three/tsl'
 // import Time from "../utils/Time"
-// import starFragmentShader from "../shaders/star/fragment.glsl"
-// import starVertexShader from "../shaders/star/vertex.glsl"
 export default class LightSpeed {
     private experience : Experience
     
@@ -14,7 +15,8 @@ export default class LightSpeed {
     private velocitiesArray : THREE.TypedArray
     private hueArray : THREE.TypedArray
 
-    private lineMaterial : THREE.ShaderMaterial
+    private lineMaterial : THREE.LineBasicNodeMaterial
+    private uniforms : Record<string, any>
     private lines! : THREE.LineSegments
     private starsCount : number = 1000
 
@@ -74,90 +76,38 @@ export default class LightSpeed {
         }
         
         
-        this.lineMaterial = new THREE.ShaderMaterial({
-            vertexShader : `
-            varying vec2 vUv;
-varying vec3 vNormal;
-varying vec3 vPosition;
-varying float vHue;
+        const u = this.uniforms = {
+            uTime : uniform(0),
+            uVelocity : uniform(10),
+            uOffset : uniform(-5),
+            uAudioVolume : uniform(0),
+            uRainbow : uniform(this.params.colorMode === 'rainbow' ? 1 : 0)
+        }
 
-uniform float uTime;
-uniform float uVelocity;
-uniform float uOffset;
+        // hsv (0..1) -> rgb
+        const hsv2rgb = (c: any) => {
+            const K = vec4(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0)
+            const p = abs(fract(vec3(c.x).add(K.xyz)).mul(6.0).sub(K.www))
+            return c.z.mul(mix(K.xxx, clamp(p.sub(K.xxx), 0.0, 1.0), c.y))
+        }
 
-attribute float aHue;
+        // Multicolor: each star gets its hue once, at spawn (aHue) - fixed for its lifetime.
+        const hue = attribute('aHue', 'float')
+        const lineColor = Fn(() => {
+            // Sound reactive: louder passages saturate and brighten the colors.
+            const saturation = float(0.65).add(u.uAudioVolume.mul(0.35))
+            const brightness = float(1.0).add(u.uAudioVolume.mul(1.5))
 
-// attribute float initialZ;
-void main()
-{
-    // Position
-    vec4 modelPosition = modelMatrix * vec4(position, 1.0);
-    float initialZ = position.z;
-    // modelPosition.z += mod(uTime*uVelocity, 15.0) ;
-    // modelPosition.x = 1.0;
-    gl_Position = projectionMatrix * viewMatrix * modelPosition;
+            // GUI toggle: plain light color, or the full rainbow palette.
+            return select(
+                u.uRainbow.greaterThan(0.5),
+                hsv2rgb(vec3(hue, saturation, brightness)),
+                vec3(brightness),
+            )
+        })()
 
-    // Model normal
-    vec3 modelNormal = (modelMatrix * vec4(normal, 0.0)).xyz;
-
-
-
-
-
-    // Varyings
-    vUv = uv;
-    vNormal = modelNormal;
-    vPosition = modelPosition.xyz;
-    vHue = aHue;
-}
-    `,
-            fragmentShader : `
-            varying vec2 vUv;
-varying vec3 vNormal;
-varying vec3 vPosition;
-varying float vHue;
-
-//Uniforms
-uniform float uTime;
-uniform float uAudioVolume;
-uniform float uRainbow;
-
-
-vec3 hsv2rgb(vec3 c)
-{
-    vec4 K = vec4(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
-    vec3 p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
-    return c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);
-}
-
-void main()
-{
-    // Multicolor: each star gets its hue once, at spawn (vHue) - fixed for its lifetime.
-    float hue = vHue;
-
-    // Sound reactive: louder passages saturate and brighten the colors.
-    float saturation = 0.65 + uAudioVolume * 0.35;
-    float brightness = 1.0 + uAudioVolume * 1.5;
-
-    // GUI toggle: plain light color, or the full rainbow palette.
-    vec3 color = uRainbow > 0.5
-        ? hsv2rgb(vec3(hue, saturation, brightness))
-        : vec3(brightness);
-
-    // Final color
-    gl_FragColor = vec4(color, 1.0);
-    #include <tonemapping_fragment>
-    #include <colorspace_fragment>
-}
-    `,
-            uniforms : {
-                uTime : new THREE.Uniform(0),
-                uVelocity : new THREE.Uniform(10),
-                uOffset : new THREE.Uniform(-5),
-                uAudioVolume : new THREE.Uniform(0),
-                uRainbow : new THREE.Uniform(this.params.colorMode === 'rainbow' ? 1 : 0)
-            }
-        })
+        this.lineMaterial = new THREE.LineBasicNodeMaterial()
+        this.lineMaterial.colorNode = lineColor
 
         this.lines = new THREE.LineSegments(geom, this.lineMaterial)
         this.lines.position.z = 0
@@ -167,7 +117,7 @@ void main()
         const gui = this.experience.helpers.GUI
         const folder = gui.addFolder('Light Speed')
         folder.add(this.params, 'colorMode', ['light', 'rainbow']).name('Color').onChange((v: 'light' | 'rainbow') => {
-            this.lineMaterial.uniforms.uRainbow.value = v === 'rainbow' ? 1 : 0
+            this.uniforms.uRainbow.value = v === 'rainbow' ? 1 : 0
         })
         folder.add(this.params, 'speed', 0.1, 5, 0.05).name('Speed')
         folder.add(this.params, 'visible').name('Show').listen().onChange((v: boolean) => {
@@ -196,10 +146,10 @@ void main()
     }
     update(){
 
-        this.lineMaterial.uniforms.uTime.value = this.experience.time.elapsedTime
+        this.uniforms.uTime.value = this.experience.time.elapsedTime
 
         const volumeSmooth = this.experience.audioManager?.volumeSmooth ?? 0
-        this.lineMaterial.uniforms.uAudioVolume.value = volumeSmooth
+        this.uniforms.uAudioVolume.value = volumeSmooth
 
         for(let i = 0; i<this.starsCount; i++){
 

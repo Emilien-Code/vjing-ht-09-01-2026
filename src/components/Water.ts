@@ -1,5 +1,8 @@
-import * as THREE from "three"
-import { Reflector } from "three/examples/jsm/objects/Reflector.js"
+import * as THREE from 'three/webgpu'
+import {
+    Fn, uniform, uv, texture, reflector,
+    float, vec2, vec3, vec4, select,
+} from 'three/tsl'
 import Experience from "../Experience"
 
 interface BodyParams {
@@ -12,21 +15,38 @@ interface BodyParams {
     waveStrength?: number
 }
 
+// Overlay blend, per channel.
+const blendOverlay = (base: any, blend: any) => {
+    const channel = (b: any, l: any) => select(
+        b.lessThan(0.5),
+        b.mul(l).mul(2.0),
+        float(1.0).sub(float(2.0).mul(float(1.0).sub(b)).mul(float(1.0).sub(l))),
+    )
+    return vec3(
+        channel(base.r, blend.r),
+        channel(base.g, blend.g),
+        channel(base.b, blend.b),
+    )
+}
+
 export default class Body {
     experience: Experience
 
     speed: number
 
-    vertex: string
-    fragment: string
-
-    customShader: any
-
     dudvMap: THREE.Texture
 
     geometry: THREE.CircleGeometry | THREE.PlaneGeometry
 
-    water: Reflector
+    // A plain mesh with a planar-reflection node material (was a WebGL
+    // `Reflector` with a hand-patched ReflectorShader).
+    water: THREE.Mesh
+
+    uniforms: {
+        color: any
+        time: any
+        waveStrength: any
+    }
 
     constructor(experience: Experience, params: BodyParams) {
         this.experience = experience
@@ -43,82 +63,6 @@ export default class Body {
 
         this.speed = speed
 
-        this.vertex = `
-        uniform mat4 textureMatrix;
-        varying vec2 vUv;
-        varying vec4 vUvRefraction;
-        
-        void main(){
-            
-            vUvRefraction = textureMatrix * vec4( position, 1.0 );
-            vUv = uv;
-            gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0);
-        
-        }`
-
-        this.fragment = `
-        uniform vec3 color;
-        uniform float time;
-        uniform float waveStrength;
-        uniform sampler2D tDiffuse;
-        uniform sampler2D tDudv;
-
-        varying vec2 vUv;
-        varying vec4 vUvRefraction;
-
-        float blendOverlay( float base, float blend ) {
-
-            return( base < 0.5 
-                ? ( 2.0 * base * blend ) 
-                : ( 1.0 - 2.0 * ( 1.0 - base ) * ( 1.0 - blend ) ) );
-
-        }
-
-        vec3 blendOverlay( vec3 base, vec3 blend ) {
-
-            return vec3(
-                blendOverlay( base.r, blend.r ),
-                blendOverlay( base.g, blend.g ),
-                blendOverlay( base.b, blend.b )
-            );
-
-        }
-
-        void main() {
-
-            float waveSpeed = 0.03;
-
-            vec2 distortedUv = texture2D(
-                tDudv,
-                vec2( vUv.x + time * waveSpeed, vUv.y )
-            ).rg * waveStrength;
-
-            distortedUv = vUv.xy + vec2(
-                distortedUv.x,
-                distortedUv.y + time * waveSpeed
-            );
-
-            vec2 distortion = (
-                texture2D( tDudv, distortedUv ).rg * 1.0 - 1.0
-            ) * waveStrength;
-
-            vec4 uv = vec4( vUvRefraction );
-            uv.xy += distortion;
-
-            vec4 base = texture2DProj( tDiffuse, uv );
-
-            gl_FragColor = vec4(
-                blendOverlay( base.rgb, color ),
-                1.0
-            );
-
-            #include <tonemapping_fragment>
-            #include <colorspace_fragment>
-
-        }`
-
-        this.customShader = Reflector.ReflectorShader
-
         // Create displacement texture
         this.dudvMap =
             this.experience.ressources.items.water_displacement
@@ -126,20 +70,12 @@ export default class Body {
         this.dudvMap.wrapS = THREE.RepeatWrapping
         this.dudvMap.wrapT = THREE.RepeatWrapping
 
-        this.customShader.uniforms.tDudv = {
-            value: this.dudvMap
+        this.uniforms = {
+            color: uniform(new THREE.Color(color)),
+            time: uniform(0),
+            waveStrength: uniform(waveStrength),
         }
-
-        this.customShader.uniforms.time = {
-            value: 0
-        }
-
-        this.customShader.uniforms.waveStrength = {
-            value: waveStrength
-        }
-
-        this.customShader.vertexShader = this.vertex
-        this.customShader.fragmentShader = this.fragment
+        const u = this.uniforms
 
         if (geometry === "circle" || radius) {
             this.geometry = new THREE.CircleGeometry(radius ?? 1)
@@ -150,18 +86,36 @@ export default class Body {
             )
         }
 
-        this.water = new Reflector(this.geometry, {
-            color,
-            textureWidth: this.experience.sizes.width,
-            textureHeight: this.experience.sizes.height
+        const reflection = reflector({ resolutionScale: 1 })
+
+        const fragment = Fn(() => {
+            const waveSpeed = 0.03
+            const vUv = uv()
+
+            const dudv = (coords: any) => texture(this.dudvMap, coords)
+
+            const distortedUv0 = dudv(vec2(vUv.x.add(u.time.mul(waveSpeed)), vUv.y)).rg.mul(u.waveStrength)
+
+            const distortedUv = vUv.add(vec2(distortedUv0.x, distortedUv0.y.add(u.time.mul(waveSpeed))))
+
+            const distortion = dudv(distortedUv).rg.mul(1.0).sub(1.0).mul(u.waveStrength)
+
+            // The reflection is sampled in screen space (see ReflectorNode);
+            // the wobble is added on top of that, like the old `uv.xy += distortion`.
+            const base = reflection.sample(reflection.uvNode.add(distortion))
+
+            return vec4(blendOverlay(base.rgb, u.color), 1.0)
         })
+
+        const material = new THREE.NodeMaterial()
+        material.fragmentNode = fragment()
+
+        this.water = new THREE.Mesh(this.geometry, material)
+        // The reflector mirrors across the plane of this object (its local +Z).
+        this.water.add(reflection.target)
     }
 
     update(): void {
-        const uniforms = this.water.material.uniforms as {
-            time: { value: number }
-        }
-
-        uniforms.time.value += this.speed
+        this.uniforms.time.value += this.speed
     }
 }

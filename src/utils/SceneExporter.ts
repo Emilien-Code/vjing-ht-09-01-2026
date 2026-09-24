@@ -1,4 +1,4 @@
-import * as THREE from "three"
+import * as THREE from 'three/webgpu'
 import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js'
 
 const exporter = new GLTFExporter()

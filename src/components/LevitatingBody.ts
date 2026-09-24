@@ -1,6 +1,6 @@
 
 import Experience from "../Experience"
-import * as THREE from "three"
+import * as THREE from 'three/webgpu'
 import GUI from "lil-gui";
 import World from "../classes/World";
 import CustomToonMaterial from "./CustomToonMaterial";
