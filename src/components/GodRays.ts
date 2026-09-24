@@ -1,6 +1,10 @@
-import * as THREE from "three"
+import * as THREE from 'three/webgpu'
 import Experience from "../Experience"
 import GUI from "lil-gui";
+import {
+    Fn, positionLocal, cameraPosition, instancedBufferAttribute,
+    float, distance, select,
+} from 'three/tsl'
 
 import { godRaysBloom } from "../common/colors";
 
@@ -11,7 +15,7 @@ export default class GodRays {
     private experience: Experience;
     private gui: GUI;
     private scene: THREE.Scene
-    private material: THREE.ShaderMaterial | THREE.MeshBasicMaterial | null = null
+    private material: THREE.MeshBasicNodeMaterial | null = null
     private geometry: THREE.PlaneGeometry | null = null
     private mesh: THREE.InstancedMesh | null = null
     private dummy: THREE.Object3D | null = null
@@ -48,7 +52,7 @@ export default class GodRays {
 
     createRays() {
 
-        this.material = new THREE.MeshBasicMaterial({
+        this.material = new THREE.MeshBasicNodeMaterial({
             map: this.experience.ressources.items.noise,
 
             color: this.raysParams.color,       // teinte du rayon
@@ -60,48 +64,33 @@ export default class GodRays {
 
 
         });
-        this.material.onBeforeCompile = (shader) => {
 
-
-            shader.vertexShader = shader.vertexShader.replace(
-                '#include <begin_vertex>',
-                `
-                #include <begin_vertex>
-                
-
-                vec4 wp = instanceMatrix * vec4(transformed, 1.0);
-
-                float dist = distance(wp.xyz, cameraPosition.xyz);
-                dist = abs( dist);
-                
-                float radius = 100.;
-                float areaFactor = .25;
-                float areaRest = 1. - areaFactor;
-                float diff = radius * areaRest;
-                float scale = 0.;
-                if(dist < radius ){
-                    if ( dist > radius * areaRest ) {
-                        float distT = dist - diff;
-                        float radiusT = radius - diff;
-                        scale =  1. - distT /radiusT;
-                    } else {
-                        scale = 1.;
-                    }
-                } else {
-                    scale = 0.;
-                    
-                }
-
-                transformed *= scale ;
-
-                `
-            );
-        }
+        // Rays vanish beyond `radius` from the camera and grow back over the
+        // outer quarter of it, scaling each quad about its own centre (the
+        // instance matrix has already been applied to positionLocal by the
+        // time positionNode runs, so the centre comes in as an attribute).
+        const centers = new Float32Array(this.raysParams.count * this.raysParams.faces * 3)
+        const centerAttr = new THREE.InstancedBufferAttribute(centers, 3)
+        const center: any = instancedBufferAttribute(centerAttr)
+        const radius = 100
+        const areaFactor = 0.25
+        const diff = radius * (1 - areaFactor)
+        this.material.positionNode = Fn(() => {
+            const dist = distance(positionLocal, cameraPosition)
+            const inFalloff = float(1.0).sub(dist.sub(diff).div(radius - diff))
+            const scale = select(
+                dist.lessThan(radius),
+                select(dist.greaterThan(diff), inFalloff, float(1.0)),
+                float(0.0),
+            )
+            return center.add(positionLocal.sub(center).mul(scale))
+        })()
 
         this.dummy = new THREE.Object3D();
 
         this.geometry = new THREE.PlaneGeometry(1, 1, 1);
 
+        this.geometry.setAttribute('aCenter', centerAttr)
         this.mesh = new THREE.InstancedMesh(this.geometry, this.material, this.raysParams.count * this.raysParams.faces);
 
         this.mesh.layers.enable(godRaysBloom.layer)
@@ -127,6 +116,9 @@ export default class GodRays {
 
                 this.dummy.updateMatrix();
                 this.mesh.setMatrixAt(plane, this.dummy.matrix);
+                centers[plane * 3] = this.dummy.position.x
+                centers[plane * 3 + 1] = this.dummy.position.y
+                centers[plane * 3 + 2] = this.dummy.position.z
                 plane++
 
             }

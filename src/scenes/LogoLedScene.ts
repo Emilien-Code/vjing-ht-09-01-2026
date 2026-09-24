@@ -1,15 +1,23 @@
 import Experience from "../Experience"
-import * as THREE from "three"
+import * as THREE from 'three/webgpu'
 import GUI from "lil-gui"
 import World from "../classes/World"
-import simplex3D from "../shaders/simplex3D"
+import {
+    NodeMaterial,
+} from 'three/webgpu'
+import {
+    Fn, If, uniform, uv, positionGeometry, float, vec2, vec3, vec4,
+    length, pow, max, exp, mix, smoothstep, fract, sin, cos,
+} from 'three/tsl'
 import { LOGO_POLYGONS, type Pt } from "../utils/logoGeometry"
 import {
     LOGO_EDGE_COUNT,
-    LOGO_LED_GLSL,
+    createLogoLedUniforms,
+    createLogoEval,
     updateLogoEdgeAudio,
     type LogoEdgeAudioParams,
-} from "../shaders/logoLedGlsl"
+} from "../tsl/logoLed"
+import { snoise3, hash12 } from "../tsl/noise"
 
 // Logo LED scene — the "triangle-led-front" idea (vgpu.sh) applied to the HT
 // logo: the logo is an opaque slab that *hides* a light source, and each of its
@@ -20,9 +28,9 @@ import {
 // the automatic animation moves exactly like it would if you dragged your
 // mouse around the shape.
 //
-// The whole thing is one full-screen fragment shader. The logo/edge geometry
-// and the per-edge distance/glow GLSL (logoEval/ledFalloff/pulseGlow) live in
-// shaders/logoLedGlsl.ts, shared with FallingBody's edge lights so both use
+// The whole thing is one full-screen fragment shader (TSL). The logo/edge
+// geometry and the per-edge distance/glow graph (logoEval/ledFalloff/pulseGlow)
+// live in tsl/logoLed.ts, shared with FallingBody's edge lights so both use
 // the exact same LED technique instead of two different ones that just look
 // similar.
 
@@ -71,9 +79,9 @@ export default class LogoLedScene extends World {
     private scene: THREE.Scene
     private gui: GUI
 
-    private material!: THREE.ShaderMaterial
+    private material!: NodeMaterial
     private mesh!: THREE.Mesh
-    private uniforms: { [key: string]: THREE.IUniform }
+    private uniforms: Record<string, any>
 
     private folder!: GUI
     private visible = false
@@ -206,57 +214,55 @@ export default class LogoLedScene extends World {
         this.gui = exp.helpers.GUI
 
         this.uniforms = {
-            uTime: { value: 0 },
-            uAspect: { value: exp.sizes.width / exp.sizes.height },
-            uAA: { value: 0.002 },
+            uTime: uniform(0),
+            uAspect: uniform(exp.sizes.width / exp.sizes.height),
+            uAA: uniform(0.002),
 
-            uScale: { value: this.params.scale },
-            uOffset: { value: new THREE.Vector2(this.params.offsetX, this.params.offsetY) },
-            uRot: { value: 0 },
+            uScale: uniform(this.params.scale),
+            uOffset: uniform(new THREE.Vector2(this.params.offsetX, this.params.offsetY)),
+            uRot: uniform(0),
 
-            uColor: { value: new THREE.Color(this.params.color) },
-            uBodyColor: { value: new THREE.Color(this.params.bodyColor) },
-            uBgColor: { value: new THREE.Color(this.params.bgColor) },
+            uColor: uniform(new THREE.Color(this.params.color)),
+            uBodyColor: uniform(new THREE.Color(this.params.bodyColor)),
+            uBgColor: uniform(new THREE.Color(this.params.bgColor)),
 
-            uEdgeAudio: { value: this.edgeAudio },
-            uLedWidth: { value: this.params.ledWidth },
-            uLedCore: { value: this.params.ledCore },
-            uLedHalo: { value: this.params.ledHalo },
-            uLedIntensity: { value: this.params.ledIntensity },
+            ...createLogoLedUniforms(this.edgeAudio, this.mouseU, {
+                ledWidth: this.params.ledWidth,
+                ledCore: this.params.ledCore,
+                ledHalo: this.params.ledHalo,
+                pulseOn: this.params.pulseOn,
+                pulseWidth: this.params.pulseWidth,
+                pulseCount: this.params.pulseCount,
+                pulseIntensity: this.params.pulseIntensity,
+            }),
+            uLedIntensity: uniform(this.params.ledIntensity),
 
-            uBackRadius: { value: this.params.backRadius },
-            uBackIntensity: { value: this.params.backIntensity },
-            uBackBase: { value: this.params.backBase },
-            uBackAudio: { value: this.params.backAudio },
-            uBackKick: { value: this.params.backKick },
-            uPunch: { value: 0 },
-            uRimRadius: { value: this.params.rimRadius },
-            uRimIntensity: { value: this.params.rimIntensity },
-            uInterior: { value: this.params.interior },
+            uBackRadius: uniform(this.params.backRadius),
+            uBackIntensity: uniform(this.params.backIntensity),
+            uBackBase: uniform(this.params.backBase),
+            uBackAudio: uniform(this.params.backAudio),
+            uBackKick: uniform(this.params.backKick),
+            uPunch: uniform(0),
+            uRimRadius: uniform(this.params.rimRadius),
+            uRimIntensity: uniform(this.params.rimIntensity),
+            uInterior: uniform(this.params.interior),
 
-            uPulseOn: { value: this.params.pulseOn ? 1 : 0 },
-            uPulseWidth: { value: this.params.pulseWidth },
-            uPulseCount: { value: this.params.pulseCount },
-            uPulseIntensity: { value: this.params.pulseIntensity },
+            uFloorOn: uniform(1),
+            uFloorY: uniform(this.params.floorY),
+            uFloorStrength: uniform(this.params.floorStrength),
+            uFloorSquash: uniform(this.params.floorSquash),
+            uFloorSpread: uniform(this.params.floorSpread),
+            uFloorBlur: uniform(this.params.floorBlur),
+            uFloorFalloff: uniform(this.params.floorFalloff),
+            uFloorNoiseScale: uniform(this.params.floorNoiseScale),
 
-            uMouseU: { value: this.mouseU },
+            uHaze: uniform(this.params.haze),
+            uVignette: uniform(this.params.vignette),
+            uGrain: uniform(this.params.grain),
+            uExposure: uniform(this.params.exposure),
 
-            uFloorOn: { value: 1 },
-            uFloorY: { value: this.params.floorY },
-            uFloorStrength: { value: this.params.floorStrength },
-            uFloorSquash: { value: this.params.floorSquash },
-            uFloorSpread: { value: this.params.floorSpread },
-            uFloorBlur: { value: this.params.floorBlur },
-            uFloorFalloff: { value: this.params.floorFalloff },
-            uFloorNoiseScale: { value: this.params.floorNoiseScale },
-
-            uHaze: { value: this.params.haze },
-            uVignette: { value: this.params.vignette },
-            uGrain: { value: this.params.grain },
-            uExposure: { value: this.params.exposure },
-
-            uVolume: { value: 0 },
-            uFlash: { value: 0 },
+            uVolume: uniform(0),
+            uFlash: uniform(0),
         }
 
         this.createMaterial()
@@ -277,150 +283,110 @@ export default class LogoLedScene extends World {
     }
 
     private createMaterial() {
-        this.material = new THREE.ShaderMaterial({
-            uniforms: this.uniforms,
-            depthTest: false,
-            depthWrite: false,
-            vertexShader: /* glsl */`
-                varying vec2 vUv;
-                void main() {
-                    vUv = uv;
-                    gl_Position = vec4(position.xy, 0.9999, 1.0);
-                }
-            `,
-            fragmentShader: /* glsl */`
-                varying vec2 vUv;
+        const u = this.uniforms
+        const logoEval = createLogoEval(u as any)
 
-                uniform float uTime;
-                uniform float uAspect;
-                uniform float uAA;
+        // Logo-space transform: undo offset, rotation and scale.
+        const toLogo = (q: any) => {
+            const qo = q.sub(u.uOffset)
+            const c: any = cos(u.uRot.negate())
+            const s: any = sin(u.uRot.negate())
+            // mat2(c, -s, s, c) * q
+            const r = vec2(c.mul(qo.x).add(s.mul(qo.y)), s.negate().mul(qo.x).add(c.mul(qo.y)))
+            return r.div(max(u.uScale, 1e-4))
+        }
 
-                uniform float uScale;
-                uniform vec2 uOffset;
-                uniform float uRot;
+        const fragment = Fn(() => {
+            const vUv: any = uv()
+            // Aspect-corrected screen space: y in [-0.5, 0.5].
+            const p: any = vUv.sub(0.5).mul(vec2(u.uAspect, 1.0))
 
-                uniform vec3 uColor;
-                uniform vec3 uBodyColor;
-                uniform vec3 uBgColor;
+            // Back wall: near-black with a soft bounce toward the centre.
+            const wall = float(0.55).add(
+                pow(max(float(1.0).sub(length(p.mul(vec2(0.65, 1.0))).mul(1.15)), 0.0), 2.0).mul(0.45)
+            )
+            const col: any = u.uBgColor.mul(wall).toVar()
 
-                uniform float uLedIntensity;
+            // ---- the logo, and the light it hides ----
+            const lp = toLogo(p)
+            const r: any = logoEval(lp, 1.0)
+            const sd: any = r.x
+            const glow: any = r.y
 
-                uniform float uBackRadius;
-                uniform float uBackIntensity;
-                uniform float uBackBase;
-                uniform float uBackAudio;
-                uniform float uBackKick;
-                uniform float uPunch;
-                uniform float uRimRadius;
-                uniform float uRimIntensity;
-                uniform float uInterior;
+            const outside = smoothstep(u.uAA.negate(), u.uAA, sd)
 
-                uniform float uFloorOn;
-                uniform float uFloorY;
-                uniform float uFloorStrength;
-                uniform float uFloorSquash;
-                uniform float uFloorSpread;
-                uniform float uFloorBlur;
-                uniform float uFloorFalloff;
-                uniform float uFloorNoiseScale;
+            // Light escaping from behind the slab: a broad halo hugging
+            // the silhouette, breathing with the overall level.
+            const backLevel = u.uBackBase
+                .add(u.uVolume.mul(u.uBackAudio))
+                .add(u.uPunch.mul(u.uBackKick))
+            const back = exp(max(sd, 0.0).negate().div(max(u.uBackRadius, 1e-3)))
+                .mul(u.uBackIntensity).mul(backLevel)
 
-                uniform float uHaze;
-                uniform float uVignette;
-                uniform float uGrain;
-                uniform float uExposure;
+            const light = u.uColor.mul(glow.mul(u.uLedIntensity).add(back))
+            col.addAssign(light.mul(outside).mul(u.uFlash.add(1.0)))
 
-                uniform float uVolume;
-                uniform float uFlash;
+            // ---- floor radiance ----
+            If(u.uFloorOn.greaterThan(0.5), () => {
+                const g = u.uFloorY.sub(p.y)
+                If(g.greaterThan(0.0), () => {
+                    // Cheap ground plane: mirror the scene under the
+                    // horizon, squashed and spread with depth, and blur
+                    // the LED falloff the further away it lands.
+                    const depth = g.div(max(float(0.5).sub(u.uFloorY), 1e-3))
+                    const fp: any = vec2(
+                        p.x.mul(depth.mul(u.uFloorSpread).add(1.0)),
+                        u.uFloorY.add(g.mul(u.uFloorSquash)),
+                    )
+                    const fr = logoEval(toLogo(fp), depth.mul(u.uFloorBlur).add(1.0))
 
-                ${simplex3D}
+                    const fBack = exp(max(fr.x, 0.0).negate().div(max(u.uBackRadius, 1e-3)))
+                        .mul(u.uBackIntensity).mul(backLevel).mul(0.6)
+                    const atten = exp(depth.mul(u.uFloorFalloff).negate())
+                    const n = float(0.6).add(
+                        float(0.4).mul(snoise3(vec3(fp.mul(u.uFloorNoiseScale), u.uTime.mul(0.06))))
+                    )
 
-                ${LOGO_LED_GLSL}
+                    col.assign(mix(col, col.mul(0.7), smoothstep(0.0, 0.015, g)))
+                    col.addAssign(
+                        u.uColor.mul(fr.y.mul(u.uLedIntensity).add(fBack))
+                            .mul(atten).mul(u.uFloorStrength).mul(n).mul(u.uFlash.add(1.0))
+                    )
+                })
+            })
 
-                float hash12(vec2 p) {
-                    vec3 p3 = fract(vec3(p.xyx) * 0.1031);
-                    p3 += dot(p3, p3.yzx + 33.33);
-                    return fract((p3.x + p3.y) * p3.z);
-                }
+            // ---- the slab itself (the occluder) ----
+            const inside = float(1.0).sub(outside)
+            const rim = exp(max(sd.negate(), 0.0).negate().div(max(u.uRimRadius, 1e-4)))
+            const body = u.uBodyColor.add(u.uColor.mul(rim).mul(u.uRimIntensity).mul(0.12))
+            col.assign(mix(col, body, inside))
 
-                vec2 toLogo(vec2 q) {
-                    q -= uOffset;
-                    float c = cos(-uRot);
-                    float s = sin(-uRot);
-                    q = mat2(c, -s, s, c) * q;
-                    return q / max(uScale, 1e-4);
-                }
+            // The three shapes overlap, so their union is one blob. Let
+            // the buried seams glow faintly through the slab, otherwise
+            // the logo reads as a silhouette instead of the logo.
+            col.addAssign(u.uColor.mul(glow).mul(u.uLedIntensity).mul(u.uInterior).mul(inside).mul(u.uFlash.add(1.0)))
 
-                void main() {
-                    // Aspect-corrected screen space: y in [-0.5, 0.5].
-                    vec2 p = (vUv - 0.5) * vec2(uAspect, 1.0);
+            // ---- atmosphere ----
+            col.addAssign(u.uColor.mul(glow).mul(u.uHaze).mul(0.12))
 
-                    // Back wall: near-black with a soft bounce toward the centre.
-                    float wall = 0.55 + 0.45 * pow(max(1.0 - length(p * vec2(0.65, 1.0)) * 1.15, 0.0), 2.0);
-                    vec3 col = uBgColor * wall;
+            const vig = float(1.0).sub(
+                u.uVignette.mul(pow(length(vUv.sub(0.5).mul(vec2(1.1, 1.0))).mul(1.35), 2.2))
+            )
+            col.mulAssign(vig.clamp(0.0, 1.0))
 
-                    // ---- the logo, and the light it hides ----
-                    vec2 lp = toLogo(p);
-                    vec2 r = logoEval(lp, 1.0);
-                    float sd = r.x;
-                    float glow = r.y;
+            col.mulAssign(u.uExposure)
+            col.addAssign(
+                hash12(vUv.mul(1024.0).add(fract(u.uTime).mul(91.7))).sub(0.5).mul(u.uGrain)
+            )
 
-                    float outside = smoothstep(-uAA, uAA, sd);
-
-                    // Light escaping from behind the slab: a broad halo hugging
-                    // the silhouette, breathing with the overall level.
-                    float back = exp(-max(sd, 0.0) / max(uBackRadius, 1e-3))
-                        * uBackIntensity * (uBackBase + uVolume * uBackAudio + uPunch * uBackKick);
-
-                    vec3 light = uColor * (glow * uLedIntensity + back);
-                    col += light * outside * (1.0 + uFlash);
-
-                    // ---- floor radiance ----
-                    if (uFloorOn > 0.5) {
-                        float g = uFloorY - p.y;
-                        if (g > 0.0) {
-                            // Cheap ground plane: mirror the scene under the
-                            // horizon, squashed and spread with depth, and blur
-                            // the LED falloff the further away it lands.
-                            float depth = g / max(0.5 - uFloorY, 1e-3);
-                            vec2 fp = vec2(p.x * (1.0 + depth * uFloorSpread), uFloorY + g * uFloorSquash);
-                            vec2 fr = logoEval(toLogo(fp), 1.0 + depth * uFloorBlur);
-
-                            float fBack = exp(-max(fr.x, 0.0) / max(uBackRadius, 1e-3))
-                                * uBackIntensity * (uBackBase + uVolume * uBackAudio + uPunch * uBackKick) * 0.6;
-                            float atten = exp(-depth * uFloorFalloff);
-                            float n = 0.6 + 0.4 * snoise(vec3(fp * uFloorNoiseScale, uTime * 0.06));
-
-                            col = mix(col, col * 0.7, smoothstep(0.0, 0.015, g));
-                            col += uColor * (fr.y * uLedIntensity + fBack) * atten * uFloorStrength * n * (1.0 + uFlash);
-                        }
-                    }
-
-                    // ---- the slab itself (the occluder) ----
-                    float inside = 1.0 - outside;
-                    float rim = exp(-max(-sd, 0.0) / max(uRimRadius, 1e-4));
-                    vec3 body = uBodyColor + uColor * rim * uRimIntensity * 0.12;
-                    col = mix(col, body, inside);
-
-                    // The three shapes overlap, so their union is one blob. Let
-                    // the buried seams glow faintly through the slab, otherwise
-                    // the logo reads as a silhouette instead of the logo.
-                    col += uColor * glow * uLedIntensity * uInterior * inside * (1.0 + uFlash);
-
-                    // ---- atmosphere ----
-                    col += uColor * glow * uHaze * 0.12;
-
-                    float vig = 1.0 - uVignette * pow(length((vUv - 0.5) * vec2(1.1, 1.0)) * 1.35, 2.2);
-                    col *= clamp(vig, 0.0, 1.0);
-
-                    col *= uExposure;
-                    col += (hash12(vUv * 1024.0 + fract(uTime) * 91.7) - 0.5) * uGrain;
-
-                    gl_FragColor = vec4(max(col, 0.0), 1.0);
-                    #include <tonemapping_fragment>
-                    #include <colorspace_fragment>
-                }
-            `,
+            return vec4(col.max(0.0), 1.0)
         })
+
+        this.material = new NodeMaterial()
+        this.material.depthTest = false
+        this.material.depthWrite = false
+        this.material.vertexNode = vec4(positionGeometry.xy, 0.9999, 1.0)
+        this.material.fragmentNode = fragment()
     }
 
     private createMesh() {

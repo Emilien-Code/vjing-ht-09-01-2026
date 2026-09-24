@@ -1,109 +1,17 @@
 import Experience from "../Experience"
-import * as THREE from "three"
+import * as THREE from 'three/webgpu'
 import GUI from "lil-gui";
 import World from "../classes/World";
-import type {
-    Variable
-} from 'three/addons/misc/GPUComputationRenderer.js'
-import { GPUComputationRenderer } from 'three/addons/misc/GPUComputationRenderer.js'
-import { SkeletonHelper } from 'three'
+import {
+    Fn, If, uniform, instanceIndex,
+    vec3, vec4, normalize, max,
+} from 'three/tsl'
+import { snoise4, randd } from "../tsl/noise"
+import { createParticleBuffers, createParticleSpriteMaterial, particleTexel } from "../tsl/gpuParticles"
+import { SkeletonHelper } from 'three/webgpu'
 
 
-const simplex4DNoise = `
-//	Simplex 4D Noise 
-//	by Ian McEwan, Stefan Gustavson (https://github.com/stegu/webgl-noise)
-//
-vec4 permute(vec4 x){return mod(((x*34.0)+1.0)*x, 289.0);}
-float permute(float x){return floor(mod(((x*34.0)+1.0)*x, 289.0));}
-vec4 taylorInvSqrt(vec4 r){return 1.79284291400159 - 0.85373472095314 * r;}
-float taylorInvSqrt(float r){return 1.79284291400159 - 0.85373472095314 * r;}
 
-vec4 grad4(float j, vec4 ip){
-  const vec4 ones = vec4(1.0, 1.0, 1.0, -1.0);
-  vec4 p,s;
-
-  p.xyz = floor( fract (vec3(j) * ip.xyz) * 7.0) * ip.z - 1.0;
-  p.w = 1.5 - dot(abs(p.xyz), ones.xyz);
-  s = vec4(lessThan(p, vec4(0.0)));
-  p.xyz = p.xyz + (s.xyz*2.0 - 1.0) * s.www; 
-
-  return p;
-}
-
-float snoise(vec4 v){
-  const vec2  C = vec2( 0.138196601125010504,  // (5 - sqrt(5))/20  G4
-                        0.309016994374947451); // (sqrt(5) - 1)/4   F4
-// First corner
-  vec4 i  = floor(v + dot(v, C.yyyy) );
-  vec4 x0 = v -   i + dot(i, C.xxxx);
-
-// Other corners
-
-// Rank sorting originally contributed by Bill Licea-Kane, AMD (formerly ATI)
-  vec4 i0;
-
-  vec3 isX = step( x0.yzw, x0.xxx );
-  vec3 isYZ = step( x0.zww, x0.yyz );
-//  i0.x = dot( isX, vec3( 1.0 ) );
-  i0.x = isX.x + isX.y + isX.z;
-  i0.yzw = 1.0 - isX;
-
-//  i0.y += dot( isYZ.xy, vec2( 1.0 ) );
-  i0.y += isYZ.x + isYZ.y;
-  i0.zw += 1.0 - isYZ.xy;
-
-  i0.z += isYZ.z;
-  i0.w += 1.0 - isYZ.z;
-
-  // i0 now contains the unique values 0,1,2,3 in each channel
-  vec4 i3 = clamp( i0, 0.0, 1.0 );
-  vec4 i2 = clamp( i0-1.0, 0.0, 1.0 );
-  vec4 i1 = clamp( i0-2.0, 0.0, 1.0 );
-
-  //  x0 = x0 - 0.0 + 0.0 * C 
-  vec4 x1 = x0 - i1 + 1.0 * C.xxxx;
-  vec4 x2 = x0 - i2 + 2.0 * C.xxxx;
-  vec4 x3 = x0 - i3 + 3.0 * C.xxxx;
-  vec4 x4 = x0 - 1.0 + 4.0 * C.xxxx;
-
-// Permutations
-  i = mod(i, 289.0); 
-  float j0 = permute( permute( permute( permute(i.w) + i.z) + i.y) + i.x);
-  vec4 j1 = permute( permute( permute( permute (
-             i.w + vec4(i1.w, i2.w, i3.w, 1.0 ))
-           + i.z + vec4(i1.z, i2.z, i3.z, 1.0 ))
-           + i.y + vec4(i1.y, i2.y, i3.y, 1.0 ))
-           + i.x + vec4(i1.x, i2.x, i3.x, 1.0 ));
-// Gradients
-// ( 7*7*6 points uniformly over a cube, mapped onto a 4-octahedron.)
-// 7*7*6 = 294, which is close to the ring size 17*17 = 289.
-
-  vec4 ip = vec4(1.0/294.0, 1.0/49.0, 1.0/7.0, 0.0) ;
-
-  vec4 p0 = grad4(j0,   ip);
-  vec4 p1 = grad4(j1.x, ip);
-  vec4 p2 = grad4(j1.y, ip);
-  vec4 p3 = grad4(j1.z, ip);
-  vec4 p4 = grad4(j1.w, ip);
-
-// Normalise gradients
-  vec4 norm = taylorInvSqrt(vec4(dot(p0,p0), dot(p1,p1), dot(p2, p2), dot(p3,p3)));
-  p0 *= norm.x;
-  p1 *= norm.y;
-  p2 *= norm.z;
-  p3 *= norm.w;
-  p4 *= taylorInvSqrt(dot(p4,p4));
-
-// Mix contributions from the five corners
-  vec3 m0 = max(0.6 - vec3(dot(x0,x0), dot(x1,x1), dot(x2,x2)), 0.0);
-  vec2 m1 = max(0.6 - vec2(dot(x3,x3), dot(x4,x4)            ), 0.0);
-  m0 = m0 * m0;
-  m1 = m1 * m1;
-  return 49.0 * ( dot(m0*m0, vec3( dot( p0, x0 ), dot( p1, x1 ), dot( p2, x2 )))
-               + dot(m1*m1, vec2( dot( p3, x3 ), dot( p4, x4 ) ) ) ) ;
-
-}
-               `
 
 
 export default class ParticleHumanDancing extends World {
@@ -115,7 +23,7 @@ export default class ParticleHumanDancing extends World {
     private guiFolder!: GUI
     private holder: THREE.Object3D
     private model!: THREE.Object3D
-    private points: THREE.Points | null = null
+    private points: THREE.Sprite | null = null
     private action: THREE.AnimationAction
     private mixer: THREE.AnimationMixer
     private bonePairs: any[] = []
@@ -123,27 +31,27 @@ export default class ParticleHumanDancing extends World {
     private particleLerpT: Float32Array = new Float32Array(0)
     private particleScatterOffset: Float32Array = new Float32Array(0)
 
-    declare geometry: {
-        instance: THREE.BufferGeometry
-
-    }
     declare baseGeometry: {
         count: number;
         instance: THREE.BufferGeometry
     }
     declare material: {
-        instance: THREE.ShaderMaterial
+        instance: THREE.SpriteNodeMaterial
+        uniforms: { uSize: any, uSizeRandomness: any }
     }
 
+    // Particle state lives in storage buffers advanced by a compute node
+    // (was a GPUComputationRenderer ping-pong texture).
     declare gpgpu: {
         size: number
-        computation: GPUComputationRenderer
-        particlesVariable: Variable
-        debug: THREE.Mesh
+        particlesBuffer: any
+        targetBuffer: any
+        prevTargetBuffer: any
+        computeNode: any
+        uniforms: Record<string, any>
+        debug?: THREE.Mesh
     }
 
-    declare particleUvObject: Float32Array
-    private targetPositionsTexture!: THREE.DataTexture
 
 
     private params = {
@@ -203,39 +111,14 @@ export default class ParticleHumanDancing extends World {
         this.baseGeometry = {} as any
         this.material = {} as any
         this.gpgpu = {} as any
-        this.geometry = {} as any
 
         this.createBaseGeometry()
-        this.createMaterial()
         this.createGPGPU()
-        this.createGeometry()
+        this.createMaterial()
         this.createPoints()
         this.setupGUI()
     }
 
-
-    private createGeometry() {
-        this.particleUvObject = new Float32Array(this.baseGeometry.count * 2)
-
-        for (let y = 0; y < this.gpgpu.size; y++) {
-            for (let x = 0; x < this.gpgpu.size; x++) {
-
-                const i = (y * this.gpgpu.size) + x
-                const i2 = i * 2
-
-                const uvX = (x + 0.5) / this.gpgpu.size
-                const uvY = (y + 0.5) / this.gpgpu.size
-
-                this.particleUvObject[i2 + 0] = uvX
-                this.particleUvObject[i2 + 1] = uvY
-            }
-        }
-
-        this.geometry.instance = new THREE.BufferGeometry()
-        this.geometry.instance.setDrawRange(0, this.baseGeometry.count)
-        this.geometry.instance.setAttribute("aParticlesUv", new THREE.BufferAttribute(this.particleUvObject, 2))
-
-    }
 
     private createBaseGeometry() {
 
@@ -293,219 +176,72 @@ export default class ParticleHumanDancing extends World {
     }
 
     private createMaterial() {
-        this.material.instance = new THREE.ShaderMaterial({
-            vertexShader: `
-
-            attribute vec2 aParticlesUv;
-
-            uniform vec2 uResolution;
-            uniform float uSize;
-            uniform float uSizeRandomness;
-            uniform sampler2D uParticlesTexture;
-            
-            varying vec3 vColor;
-            varying float vVelocity;
-
-
-            float random(vec2 st) {
-    return fract(sin(dot(st, vec2(12.9898, 78.233))) * 43758.5453123);
-}
-
-
-            void main()
-            {
-
-            vec4 particle = texture(uParticlesTexture, aParticlesUv);
-                // Positions from GPGPU are already in world space — skip modelMatrix
-                vec4 viewPosition = viewMatrix * vec4(particle.xyz, 1.0);
-                vec4 projectedPosition = projectionMatrix * viewPosition;
-                gl_Position = projectedPosition;
-                float velocity = particle.a;
-
-                // Per-particle size variation using UV as stable seed
-                float rand = fract(sin(dot(aParticlesUv, vec2(12.9898, 78.233))) * 43758.5453);
-                float sizeScale =( 1.0 + (rand - 0.5) * uSizeRandomness) * (1.0 + max(velocity, -3.0)/3.);
-
-                // Point size
-                gl_PointSize = uSize * uResolution.y * sizeScale;
-                gl_PointSize *= (1.0 / - viewPosition.z);
-
-                // Varyings
-
-
-                vec3 color = mix(
-                    vec3(
-                        (18. * 1.)/255.,
-                        (29. * 1.)/255.,
-                        (31. * 1.)/255.
-                    ),
-                    vec3(
-                        212./255.,
-                        213./255.,
-                        209./255.
-                    ),
-                    uSizeRandomness / 10.
-                );
-
-                float r = random(aParticlesUv);
-
-
-
-                vColor = mix(
-                    vec3(207./255., 162./255., 202./255.),
-                    vec3(157./255., 53./255., 119./255.),
-                    r
-                );
-                
-                // if(r > 0.15 ) {
-                //     vColor = ;//color;
-                // } else {
-                //     vColor = vec3(1.0, 1.0, 1.0);//color;
-                // }
-
-                vVelocity = particle.a* 0.01;
-            }
-
-            `,
-
-            fragmentShader: `
-            varying vec3 vColor;
-            varying float vVelocity;
-
-            void main()
-            {
-                float distanceToCenter = length(gl_PointCoord - 0.5);
-                if(distanceToCenter > 0.5)
-                    discard;
-                
-
-                // if(vVelocity < - 4.)
-                //     discard;
-
-
-                gl_FragColor = vec4(vColor, 1.0);// + max(vVelocity, -3.0)/3.);
-
-                #include <tonemapping_fragment>
-                #include <colorspace_fragment>
-            }
-            `,
-            uniforms:
-            {
-                uSize: new THREE.Uniform(this.params.size),
-                uSizeRandomness: new THREE.Uniform(this.params.sizeRandomness),
-                uResolution: new THREE.Uniform(new THREE.Vector2(this.exp.sizes.width * this.exp.sizes.pixelRatio, this.exp.sizes.height * this.exp.sizes.pixelRatio)),
-                uParticlesTexture: new THREE.Uniform(),
-            },
-            transparent: true,
-
-
+        const { material, uniforms } = createParticleSpriteMaterial({
+            particlesBuffer: this.gpgpu.particlesBuffer,
+            textureSize: this.gpgpu.size,
+            size: this.params.size,
+            sizeRandomness: this.params.sizeRandomness,
+            sizeScale: (particle: any, rand: any, uSizeRandomness: any) =>
+                rand.sub(0.5).mul(uSizeRandomness).add(1.0)
+                    .mul(max(particle.w, -3.0).div(3.0).add(1.0)),
         })
+        this.material.instance = material
+        this.material.uniforms = uniforms
     }
 
     private createGPGPU() {
-        this.gpgpu.size = Math.ceil(Math.sqrt(this.baseGeometry.count))
-        this.gpgpu.computation = new GPUComputationRenderer(this.gpgpu.size, this.gpgpu.size, this.exp.renderer.instance)
+        const count = this.baseGeometry.count
+        this.gpgpu.size = Math.ceil(Math.sqrt(count))
+        const size = this.gpgpu.size
 
-        const baseParticlesTexture = this.gpgpu.computation.createTexture()
+        const buffers = createParticleBuffers(
+            this.baseGeometry.instance.attributes.position.array,
+            count,
+            { flattenZ: false, prev: false },
+        )
+        this.gpgpu.particlesBuffer = buffers.particlesBuffer
+        this.gpgpu.targetBuffer = buffers.targetBuffer
+        this.gpgpu.prevTargetBuffer = buffers.prevTargetBuffer
 
-        for (let i = 0; i < this.baseGeometry.count; i++) {
-            const i3 = i * 3
-            const i4 = i * 4
-
-            // Position based on geometry
-            baseParticlesTexture.image.data[i4 + 0] = this.baseGeometry.instance.attributes.position.array[i3 + 0]
-            baseParticlesTexture.image.data[i4 + 1] = this.baseGeometry.instance.attributes.position.array[i3 + 1]
-            baseParticlesTexture.image.data[i4 + 2] = this.baseGeometry.instance.attributes.position.array[i3 + 2]
-            baseParticlesTexture.image.data[i4 + 3] = 0
+        const u = this.gpgpu.uniforms = {
+            uDeltaTime: uniform(0),
+            uGravity: uniform(4.0),
+            uFallRange: uniform(2.0),
+            uFlowFieldFactor: uniform(this.params.flowFieldFactor),
+            uOffset: uniform(this.params.offset),
         }
 
+        this.gpgpu.computeNode = (Fn(() => {
+            const particle = this.gpgpu.particlesBuffer.element(instanceIndex)
+            const target = this.gpgpu.targetBuffer.element(instanceIndex)
 
+            const rand = randd(particleTexel(instanceIndex, size))
+            const resetThreshold = target.y.sub(rand.add(0.5).mul(u.uFallRange))
 
-        this.targetPositionsTexture = this.gpgpu.computation.createTexture()
-        for (let i = 0; i < this.baseGeometry.count; i++) {
-            const i3 = i * 3
-            const i4 = i * 4
-            this.targetPositionsTexture.image.data[i4 + 0] = this.baseGeometry.instance.attributes.position.array[i3 + 0]
-            this.targetPositionsTexture.image.data[i4 + 1] = this.baseGeometry.instance.attributes.position.array[i3 + 1]
-            this.targetPositionsTexture.image.data[i4 + 2] = this.baseGeometry.instance.attributes.position.array[i3 + 2]
-            this.targetPositionsTexture.image.data[i4 + 3] = 0
-        }
+            const velocity = particle.w.sub(u.uGravity.mul(u.uDeltaTime)).toVar()
+            const newPos = particle.xyz.add(vec3(0.0, velocity.mul(u.uDeltaTime), 0.0)).toVar()
 
-        const gpgpuParticlesShader = `
+            If(newPos.y.lessThan(resetThreshold), () => {
+                newPos.assign(target.xyz)
+                velocity.assign(0.0)
+            })
 
+            const flowField = normalize(vec3(
+                snoise4(vec4(particle.xyz.add(0.0), 0.0)),
+                snoise4(vec4(particle.xyz.add(1.0), 0.0)),
+                snoise4(vec4(particle.xyz.add(2.0), 0.0)),
+            ))
+            newPos.addAssign(flowField.mul(u.uFlowFieldFactor))
 
-${simplex4DNoise}
-
-
-
-
-        uniform sampler2D uTargetPositions;
-        uniform float uDeltaTime;
-        uniform float uGravity;
-        uniform float uFallRange;
-        uniform float uFlowFieldFactor;
-        uniform vec3 uOffset;
-
-        void main()
-        {
-            vec2 uv = gl_FragCoord.xy / resolution.xy;
-            vec4 particle = texture(uParticles, uv);
-            vec4 target = texture(uTargetPositions, uv);
-
-            float rand = fract(sin(dot(uv, vec2(12.9898, 78.233))) * 43758.5453);
-            float resetThreshold = target.y - (0.5 + rand) * uFallRange;
-
-            float velocity = particle.w - uGravity * uDeltaTime;
-            vec3 newPos = particle.xyz + vec3(0.0, velocity * uDeltaTime, 0.0);
-
-            if (newPos.y < resetThreshold) {
-                newPos = target.xyz;
-                velocity = 0.0;
-            }
-
-
-
-            vec3 flowField = vec3(
-                snoise(vec4(particle.xyz + 0.0, 0.0)),
-                snoise(vec4(particle.xyz + 1.0, 0.0)),
-                snoise(vec4(particle.xyz + 2.0, 0.0))
-            );
-
-            flowField = normalize(flowField);
-
-            newPos.xyz += flowField * uFlowFieldFactor;
-
-
-            gl_FragColor = vec4(newPos, velocity);
-        }
-
-        `
-
-        this.gpgpu.particlesVariable = this.gpgpu.computation.addVariable('uParticles', gpgpuParticlesShader, baseParticlesTexture)
-        this.gpgpu.computation.setVariableDependencies(this.gpgpu.particlesVariable, [this.gpgpu.particlesVariable])
-        this.gpgpu.particlesVariable.material.uniforms.uTargetPositions = { value: this.targetPositionsTexture }
-        this.gpgpu.particlesVariable.material.uniforms.uDeltaTime = { value: 0 }
-        this.gpgpu.particlesVariable.material.uniforms.uGravity = { value: 4.0 }
-        this.gpgpu.particlesVariable.material.uniforms.uFallRange = { value: 2.0 }
-        this.gpgpu.particlesVariable.material.uniforms.uFlowFieldFactor = { value: this.params.flowFieldFactor }
-        this.gpgpu.particlesVariable.material.uniforms.uOffset = { value: this.params.offset }
-
-        this.gpgpu.computation.init()
-
-
-
-        // this.gpgpu.debug = new THREE.Mesh(
-        //     new THREE.PlaneGeometry(3, 3),
-        //     new THREE.MeshBasicMaterial({ map: this.gpgpu.computation.getCurrentRenderTarget(this.gpgpu.particlesVariable).texture })
-
-        // )
-        // this.gpgpu.debug.position.x = 3
-        // this.scene.add(this.gpgpu.debug)
+            particle.assign(vec4(newPos, velocity))
+        })() as any).compute(count)
     }
 
     private createPoints() {
 
-        this.points = new THREE.Points(this.geometry.instance, this.material.instance)
+        this.points = new THREE.Sprite(this.material.instance)
+        this.points.count = this.baseGeometry.count
+        this.points.frustumCulled = false
         this.holder.add(this.points)
 
     }
@@ -520,7 +256,7 @@ ${simplex4DNoise}
         }
         this.createBaseGeometry()
         this.createGPGPU()
-        this.createGeometry()
+        this.createMaterial()
         this.createPoints()
     }
 
@@ -535,13 +271,13 @@ ${simplex4DNoise}
         folder.add(this.params, 'size', 0.001, 0.05, 0.001)
             .name('Size')
             .onChange((v: number) => {
-                this.material.instance.uniforms.uSize.value = v
+                this.material.uniforms.uSize.value = v
             })
 
         folder.add(this.params, 'sizeRandomness', 0, 20, 0.01)
             .name('Size Randomness')
             .onChange((v: number) => {
-                this.material.instance.uniforms.uSizeRandomness.value = v
+                this.material.uniforms.uSizeRandomness.value = v
             })
 
         folder.add(this.params, 'scatter', 0, 1, 0.01)
@@ -550,19 +286,19 @@ ${simplex4DNoise}
         folder.add(this.params, 'gravity', 0, 20, 0.1)
             .name('Gravity')
             .onChange((v: number) => {
-                this.gpgpu.particlesVariable.material.uniforms.uGravity.value = v
+                this.gpgpu.uniforms.uGravity.value = v
             })
 
         folder.add(this.params, 'fallRange', 0.1, 10, 0.1)
             .name('Fall Range')
             .onChange((v: number) => {
-                this.gpgpu.particlesVariable.material.uniforms.uFallRange.value = v
+                this.gpgpu.uniforms.uFallRange.value = v
             })
 
         folder.add(this.params, 'flowFieldFactor', 0.01, 1, 0.01)
             .name('Fall Range')
             .onChange((v: number) => {
-                this.gpgpu.particlesVariable.material.uniforms.uFlowFieldFactor.value = v
+                this.gpgpu.uniforms.uFlowFieldFactor.value = v
             })
         folder.add(this.params, 'rotation', -Math.PI, Math.PI, 0.01)
             .name('rotation ')
@@ -577,7 +313,7 @@ ${simplex4DNoise}
         // folder.addColor(this.params, 'color')
         //     .name('Color ')
         //     .onChange((v: number) => {
-        //         // this.material.instance.uniforms.uSizeRandomness.value = v
+        //         // this.material.uniforms.uSizeRandomness.value = v
 
         //     })
 
@@ -628,6 +364,8 @@ ${simplex4DNoise}
         const tempPosA = new THREE.Vector3()
         const tempPosB = new THREE.Vector3()
 
+        const targetData: Float32Array = this.gpgpu.targetBuffer.value.array
+
         for (let i = 0; i < this.baseGeometry.count; i++) {
             const pair = this.particleBonePairs[i]
             const boneA = pair[0]
@@ -641,19 +379,17 @@ ${simplex4DNoise}
 
             const i4 = i * 4
             const i3 = i * 3
-            this.targetPositionsTexture.image.data[i4 + 0] = tempPos.x + this.particleScatterOffset[i3 + 0] * this.params.scatter + this.params.offset.x
-            this.targetPositionsTexture.image.data[i4 + 1] = tempPos.y + this.particleScatterOffset[i3 + 1] * this.params.scatter + this.params.offset.y
-            this.targetPositionsTexture.image.data[i4 + 2] = tempPos.z + this.particleScatterOffset[i3 + 2] * this.params.scatter + this.params.offset.z
-            this.targetPositionsTexture.image.data[i4 + 3] = 0
+            targetData[i4 + 0] = tempPos.x + this.particleScatterOffset[i3 + 0] * this.params.scatter + this.params.offset.x
+            targetData[i4 + 1] = tempPos.y + this.particleScatterOffset[i3 + 1] * this.params.scatter + this.params.offset.y
+            targetData[i4 + 2] = tempPos.z + this.particleScatterOffset[i3 + 2] * this.params.scatter + this.params.offset.z
+            targetData[i4 + 3] = 0
         }
 
-        this.targetPositionsTexture.needsUpdate = true
+        this.gpgpu.targetBuffer.value.needsUpdate = true
 
-        this.gpgpu.particlesVariable.material.uniforms.uDeltaTime.value = this.exp.time.delta / 1000
-        this.gpgpu.particlesVariable.material.uniforms.uTargetPositions.value = this.targetPositionsTexture
+        this.gpgpu.uniforms.uDeltaTime.value = this.exp.time.delta / 1000
 
-        this.gpgpu.computation.compute()
-        this.material.instance.uniforms.uParticlesTexture.value = this.gpgpu.computation.getCurrentRenderTarget(this.gpgpu.particlesVariable).texture
+        this.exp.renderer.instance.compute(this.gpgpu.computeNode)
 
         this.mixer.update(this.exp.time.delta)
 

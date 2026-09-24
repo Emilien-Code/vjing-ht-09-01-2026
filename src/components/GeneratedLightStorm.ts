@@ -1,16 +1,15 @@
 import Experience from "../Experience"
-import * as THREE from "three"
+import * as THREE from 'three/webgpu'
 import GUI from "lil-gui"
 import World from "../classes/World"
-import { Line2 } from "three/examples/jsm/lines/Line2.js"
-import { LineMaterial } from "three/examples/jsm/lines/LineMaterial.js"
-import { LineGeometry } from "three/examples/jsm/lines/LineGeometry.js"
+import { Line2 } from "three/addons/lines/webgpu/Line2.js"
+import { LineGeometry } from "three/addons/lines/LineGeometry.js"
 
 interface Bolt {
     boltGroup: THREE.Group
     life: number
     maxLife: number
-    materials: LineMaterial[]
+    materials: THREE.Line2NodeMaterial[]
 }
 
 export default class LightStorm extends World {
@@ -112,13 +111,13 @@ export default class LightStorm extends World {
         return positions
     }
 
-    private makeLine(positions: number[], linewidth: number, opacity: number): { line: Line2, material: LineMaterial } {
-        const material = new LineMaterial({
+    private makeLine(positions: number[], linewidth: number, opacity: number): { line: Line2, material: THREE.Line2NodeMaterial } {
+        // (Line2NodeMaterial reads the viewport itself — no `resolution` to keep in sync.)
+        const material = new THREE.Line2NodeMaterial({
             color: this.params.color,
             transparent: true,
             opacity,
             linewidth,
-            resolution: new THREE.Vector2(window.innerWidth, window.innerHeight),
         })
         const geo = new LineGeometry()
         geo.setPositions(positions)
@@ -129,7 +128,7 @@ export default class LightStorm extends World {
 
     private spawnBolt() {
         const boltGroup = new THREE.Group()
-        const materials: LineMaterial[] = []
+        const materials: THREE.Line2NodeMaterial[] = []
         const opacity = 1
 
         // Main bolt

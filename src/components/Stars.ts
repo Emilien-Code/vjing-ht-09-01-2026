@@ -1,6 +1,6 @@
 import Component from "../../classes/Component";
 import type Experience from "../../Experience";
-import * as THREE from "three"
+import * as THREE from 'three/webgpu'
 export default class Stars extends Component{
 
     private experience : Experience

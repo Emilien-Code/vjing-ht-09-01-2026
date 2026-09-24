@@ -1,8 +1,13 @@
 import Experience from "../Experience"
 import World from "../classes/World"
 import GUI from "lil-gui"
-import * as THREE from "three"
-import simplex3D from "../shaders/simplex3D"
+import * as THREE from 'three/webgpu'
+import { NodeMaterial } from 'three/webgpu'
+import {
+    Fn, uniform, varying, positionLocal, normalLocal, frontFacing,
+    modelWorldMatrix, modelViewMatrix, cameraViewMatrix, cameraProjectionMatrix,
+    float, vec3, vec4, sin, fract, smoothstep, normalize, dot, max, clamp, mix, pow, select,
+} from 'three/tsl'
 
 // Holographic HT logo — the real ht_logo.glb asset (loaded via
 // Ressources/sources.ts, same pattern as LightStorm's storm_light model)
@@ -21,8 +26,8 @@ export default class HolographicLogoScene extends World {
     private gui: GUI
 
     private group!: THREE.Group
-    private material!: THREE.ShaderMaterial
-    private uniforms: { [key: string]: THREE.IUniform }
+    private material!: NodeMaterial
+    private uniforms: Record<string, any>
 
     private folder!: GUI
     private visible = false
@@ -71,24 +76,24 @@ export default class HolographicLogoScene extends World {
         this.gui = exp.helpers.GUI
 
         this.uniforms = {
-            uTime: { value: 0 },
-            uDisplaceStrength: { value: this.params.displaceStrength },
+            uTime: uniform(0),
+            uDisplaceStrength: uniform(this.params.displaceStrength),
 
-            uColorA: { value: new THREE.Color(this.params.colorA) },
-            uColorB: { value: new THREE.Color(this.params.colorB) },
+            uColorA: uniform(new THREE.Color(this.params.colorA)),
+            uColorB: uniform(new THREE.Color(this.params.colorB)),
 
-            uIntensity: { value: this.params.intensity },
-            uBaseBrightness: { value: this.params.baseBrightness },
-            uFresnelPower: { value: this.params.fresnelPower },
-            uStripeSpeed: { value: this.params.stripeSpeed },
-            uStripeFrequency: { value: this.params.stripeFrequency },
-            uNoiseScale: { value: this.params.noiseScale },
+            uIntensity: uniform(this.params.intensity),
+            uBaseBrightness: uniform(this.params.baseBrightness),
+            uFresnelPower: uniform(this.params.fresnelPower),
+            uStripeSpeed: uniform(this.params.stripeSpeed),
+            uStripeFrequency: uniform(this.params.stripeFrequency),
+            uNoiseScale: uniform(this.params.noiseScale),
 
-            uGlowBase: { value: this.params.glowBase },
-            uGlowAudio: { value: this.params.glowAudio },
-            uGlowKick: { value: this.params.glowKick },
-            uVolume: { value: 0 },
-            uPunch: { value: 0 },
+            uGlowBase: uniform(this.params.glowBase),
+            uGlowAudio: uniform(this.params.glowAudio),
+            uGlowKick: uniform(this.params.glowKick),
+            uVolume: uniform(0),
+            uPunch: uniform(0),
         }
 
         this.createMaterial()
@@ -98,146 +103,60 @@ export default class HolographicLogoScene extends World {
     }
 
     private createMaterial() {
-        this.material = new THREE.ShaderMaterial({
-            uniforms: this.uniforms,
-            transparent: true,
-            // depthWrite: false,
-            // Additive instead of normal alpha blending: a holographic glow on a
-            // near-black scene needs to add light against the background, not
-            // fade between two colours — alpha-blended low-alpha fragments just
-            // read as invisible. This also sidesteps needing correct back-to-
-            // front sorting across the three overlapping logo shapes.
-            // blending: THREE.AdditiveBlending,
-            // side: THREE.DoubleSide,
-            vertexShader: /* glsl */`
-                varying vec3 vPosition;
-                varying vec3 vNormal;
-                varying vec3 vViewDir;
+        const u = this.uniforms
 
-                uniform float uTime;
-                uniform float uDisplaceStrength;
+        const random2D = (v: any) => fract(sin(v.x.mul(12.9898).add(v.y.mul(78.233))).mul(43758.5453123))
 
-                float random2D(vec2 value){return fract(sin(dot(value.xy, vec2(12.9898,78.233))) * 43758.5453123);}
+        // ---- vertex: audio-independent glitchy displacement in world space ----
+        // (Plain expressions only: .assign() is only legal inside an Fn().)
+        const basePosition: any = modelWorldMatrix.mul(vec4(positionLocal, 1.0))
 
-                void main(){
-                    vec4 modelPosition = modelMatrix * vec4(position, 1.0);
+        const variationTime = u.uTime.sub(basePosition.y)
+        const variationStrength = sin(variationTime)
+            .add(sin(variationTime.mul(3.45)))
+            .add(sin(variationTime.mul(8.76)))
+            .div(3.0)
+        const strength = smoothstep(0.3, 1.0, variationStrength).mul(u.uDisplaceStrength)
 
-                    float variationTime = uTime - modelPosition.y;
-                    float variationStrength = sin(variationTime) + sin(variationTime * 3.45) + sin(variationTime * 8.76);
-                    variationStrength /= 3.0;
-                    variationStrength = smoothstep(0.3, 1.0, variationStrength);
-                    variationStrength *= uDisplaceStrength;
+        const modelPosition = vec4(
+            basePosition.x.add(random2D(basePosition.xz.mul(u.uTime)).sub(0.5).mul(strength)),
+            basePosition.y,
+            basePosition.z.add(random2D(basePosition.zx.mul(u.uTime)).sub(0.5).mul(strength)),
+            basePosition.w,
+        )
 
-                    modelPosition.x += (random2D(modelPosition.xz * uTime) - 0.5) * variationStrength;
-                    modelPosition.z += (random2D(modelPosition.zx * uTime) - 0.5) * variationStrength;
+        const mvPosition = modelViewMatrix.mul(vec4(positionLocal, 1.0))
+        const vViewDir = varying(mvPosition.xyz.negate())
+        const vNormal = varying(modelWorldMatrix.mul(vec4(normalLocal, 0.0)).xyz)
 
-                    gl_Position = projectionMatrix * viewMatrix * modelPosition;
-                    vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
-                    vViewDir = normalize(-mvPosition.xyz);
-                    vec4 modelNormal = modelMatrix * vec4(normal, 0.0);
-                    vPosition = modelPosition.xyz;
-                    vNormal = modelNormal.xyz;
-                }
-            `,
-            fragmentShader: /* glsl */`
-                uniform float uTime;
-                uniform vec3 uColorA;
-                uniform vec3 uColorB;
-                uniform float uIntensity;
-                uniform float uBaseBrightness;
-                uniform float uFresnelPower;
-                uniform float uStripeSpeed;
-                uniform float uStripeFrequency;
-                uniform float uNoiseScale;
-                uniform float uGlowBase;
-                uniform float uGlowAudio;
-                uniform float uGlowKick;
-                uniform float uVolume;
-                uniform float uPunch;
+        // ---- fragment ----
+        // The GLSL this replaces first built a planet-style base/rim/scanline/
+        // hidden-light colour (uColorA/B, uIntensity, uStripe*, uGlow*, ...),
+        // but then overwrote gl_FragColor with the fresnel look below, so none
+        // of it ever reached the screen. Only the live path is ported; the
+        // GUI-facing uniforms are kept so the folder still builds.
+        const fragment = Fn(() => {
+            const baseColor = vec3(0.102, 0.114, 0.141)   // 0x1a1d24
+            const fresnelColor = vec3(0.416, 0.831, 1.0)  // 0x6ad4ff
+            const fresnelPower = 2.2
+            const fresnelIntensity = 1.6
+            const baseOpacity = 0.06
+            const lightDir = vec3(0.4, 0.8, 0.6)
 
-                varying vec3 vPosition;
-                varying vec3 vNormal;
-                varying vec3 vViewDir;
-
-                ${simplex3D}
-
-                void main(){
-                    vec3 normal = normalize(vNormal);
-
-                    // Procedural stand-ins for the planet's earth/specular-clouds
-                    // texture reads, sampled in world space (not vUv, which the
-                    // extrusion's cap/side faces map inconsistently).
-                    float strokeNoise = snoise(vPosition * uNoiseScale + vec3(0.0, 0.0, uTime * 0.15));
-                    float stroke = smoothstep(0.15, 0.85, strokeNoise);
-
-                    float lightsNoise = snoise(vPosition * uNoiseScale * 2.3 + vec3(11.0, 0.0, uTime * 0.22));
-                    float lights = smoothstep(0.55, 1.0, lightsNoise);
-
-                    float stripes = mod((vPosition.y - uTime * uStripeSpeed) * uStripeFrequency, 1.0);
-                    stripes = pow(stripes, 3.0);
-
-                    // Rotating colour gradient — angle around the logo instead of
-                    // the planet's cos(vUv.x)/sin(vUv.y), which divides by zero
-                    // at the extrusion's UV seams.
-                    float angle = atan(vPosition.y, vPosition.x);
-                    vec3 gradient = mix(uColorA, uColorB, sin(angle + uTime * 2.0) * 0.5 + 0.5);
-
-                    vec3 viewDirection = normalize(vPosition - cameraPosition);
-                    float fresnel = dot(viewDirection, normal) + 1.0;
-                    fresnel = pow(fresnel, uFresnelPower);
-
-                    // Base fill: the whole silhouette reads clearly on its own —
-                    // with additive blending, a pure fresnel-only rim leaves the
-                    // rest of the surface literally black (invisible against the
-                    // scene background), so this is not just an accent term.
-                    vec3 base = mix(uColorA, gradient, stroke) * uBaseBrightness;
-
-                    // Rim glow + scanlines running across it.
-                    vec3 rim = gradient * fresnel * (0.6 + stripes * 1.4);
-
-                    // Sound-reactive hidden light — analog of the planet's
-                    // texture-driven "lights" term.
-                    float glow = uGlowBase + uVolume * uGlowAudio + uPunch * uGlowKick;
-                    vec3 hidden = gradient * lights * glow;
-
-                    vec3 col = (base + rim + hidden) * uIntensity;
-
-
-
-
-//Recreate fresnel
-        // vec3 viewDirection2 = normalize(vPosition - cameraPosition);
-        // float fresnel2 = dot(viewDirection2, normal) + 1.0;
-
-
-
-        vec3 baseColor = vec3(0.102, 0.114, 0.141);  // 0x1a1d24
-        vec3 fresnelColor = vec3(0.416, 0.831, 1.000);  // 0x6ad4ff
-        float fresnelPower = 2.2;
-        float fresnelIntensity = 1.6;
-        float baseOpacity = 0.06;
-            vec3 lightDir = vec3(0.4, 0.8, 0.6);
-
-        vec3 V = normalize(vViewDir);
-            vec3 N = normalize(vNormal);
-            if (!gl_FrontFacing) { N = -N; }
-            float diff = max(dot(N, normalize(lightDir)), 0.0);
-            vec3 diffuse = baseColor * (0.35 + 0.65 * diff);
-            float fresnel2 = pow(1.0 - clamp(dot(N, V), 0.0, 1.0), fresnelPower);
-            vec3 color = mix(diffuse, fresnelColor, fresnel2);
-            float alpha = clamp(mix(baseOpacity, 1.0, fresnel2) * fresnelIntensity, 0.0, 1.0);
-            gl_FragColor = vec4(color, alpha);
-
-
-
-
-    // 3. Output to screen (Alpha set to 1.0)
-    // gl_FragColor = vec4(debugColor, 1.0);
-                    #include <tonemapping_fragment>
-                    #include <colorspace_fragment>
-                }
-            `,
+            const V = normalize(vViewDir)
+            const N = select(frontFacing, normalize(vNormal), normalize(vNormal).negate())
+            const diff = max(dot(N, normalize(lightDir)), 0.0)
+            const diffuse = baseColor.mul(float(0.35).add(diff.mul(0.65)))
+            const fresnel2 = pow(float(1.0).sub(clamp(dot(N, V), 0.0, 1.0)), fresnelPower)
+            const color = mix(diffuse, fresnelColor, fresnel2)
+            const alpha = clamp(mix(float(baseOpacity), 1.0, fresnel2).mul(fresnelIntensity), 0.0, 1.0)
+            return vec4(color, alpha)
         })
+
+        this.material = new NodeMaterial()
+        this.material.transparent = true
+        this.material.vertexNode = cameraProjectionMatrix.mul(cameraViewMatrix).mul(modelPosition)
+        this.material.fragmentNode = fragment()
     }
 
     private createMesh() {

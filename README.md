@@ -21,6 +21,10 @@ npm run build    # production build
 npm run preview  # preview the production build
 ```
 
+### Rendering
+
+The app renders with Three.js `WebGPURenderer` (r186) and every shader is written in [TSL](https://threejs.org/docs/TSL.html) (Three's node-based shading language) — there is no GLSL in the project. WebGPU is used when the browser has it; otherwise Three falls back to its WebGL2 backend automatically, with the same visuals. Shared TSL code (noise, the logo LED distance field, the noise-displaced surface, GPU particles) lives in `src/tsl/`, and the post-processing chain (ACES tone mapping → sobel → colour correction → ascii → RGB shift → vignette, plus the selective bloom) is a single node graph in `src/utils/Renderer.ts`.
+
 ## Commands
 
 | Action | Control |

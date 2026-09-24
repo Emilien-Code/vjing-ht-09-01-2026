@@ -2,7 +2,7 @@ import Experience from "../Experience"
 import World from "../classes/World"
 import Sphere from "../components/Sphere"
 import GUI from "lil-gui"
-import * as THREE from "three"
+import * as THREE from 'three/webgpu'
 
 export default class SphereLevitatingScene extends World {
 

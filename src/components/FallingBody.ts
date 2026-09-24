@@ -1,20 +1,26 @@
 
 import Experience from "../Experience"
-import * as THREE from "three"
+import * as THREE from 'three/webgpu'
 import GUI from "lil-gui";
 import World from "../classes/World";
 import { LOGO_POLYGONS, LOGO_DEFAULT_HEIGHT, type Pt } from "../utils/logoGeometry";
+import { NodeMaterial } from 'three/webgpu'
+import {
+    Fn, uniform, varying, positionGeometry, float, vec4,
+    max, exp, mix, smoothstep, clamp,
+} from 'three/tsl'
 import {
     LOGO_EDGE_COUNT,
-    LOGO_LED_GLSL,
     LOGO_LED_DEFAULTS,
+    createLogoLedUniforms,
+    createLogoEval,
     updateLogoEdgeAudio,
     type LogoEdgeAudioParams,
-} from "../shaders/logoLedGlsl";
+} from "../tsl/logoLed";
 
 // Builds a flat plane, sized to the logo polygons' bounding box (plus
 // padding for the halo to bleed into), sitting directly in "logo space" —
-// the same coordinate system LOGO_LED_GLSL's edge literals are baked in.
+// the same coordinate system logoEval()'s edge constants are baked in.
 // Vertex positions are left unscaled here; the mesh's own `.scale` (set to
 // LOGO_DEFAULT_HEIGHT below) handles sizing it into world units, so
 // `position.xy` in the vertex shader stays in logo space and can be fed
@@ -47,7 +53,8 @@ export default class FallingBody extends World {
     // working unchanged — this now holds a single flat LED-shader plane
     // instead of a loaded GLTF or an extruded 3D mesh.
     public gltf!: { scene: THREE.Object3D }
-    private planeMat!: THREE.ShaderMaterial
+    private planeMat!: NodeMaterial
+    private uniforms!: Record<string, any>
     private planeGeo!: THREE.BufferGeometry
     private mesh!: THREE.Mesh
 
@@ -144,111 +151,80 @@ export default class FallingBody extends World {
     // effect (floor reflection, background, vignette/grain) — this is a
     // flat plane living inside the 3D scene instead.
     private createPlaneMaterial() {
-        this.planeMat = new THREE.ShaderMaterial({
-            uniforms: {
-                uAA: { value: 0.01 },
+        const u: any = this.uniforms = {
+            uAA: uniform(0.01),
 
-                uColor: { value: new THREE.Color(this.params.color) },
-                uBodyColor: { value: new THREE.Color(this.params.bodyColor) },
+            uColor: uniform(new THREE.Color(this.params.color)),
+            uBodyColor: uniform(new THREE.Color(this.params.bodyColor)),
 
-                uLedIntensity: { value: this.params.ledIntensity },
-                uLedWidth: { value: this.params.ledWidth },
-                uLedCore: { value: this.params.ledCore },
-                uLedHalo: { value: this.params.ledHalo },
-                uRimRadius: { value: this.params.rimRadius },
-                uRimIntensity: { value: this.params.rimIntensity },
-                uInterior: { value: this.params.interior },
-                uAmbient: { value: this.params.ambient },
+            uLedIntensity: uniform(this.params.ledIntensity),
+            ...createLogoLedUniforms(this.edgeAudio, this.mouseU, {
+                ledWidth: this.params.ledWidth,
+                ledCore: this.params.ledCore,
+                ledHalo: this.params.ledHalo,
+                pulseOn: this.params.pulseOn,
+                pulseWidth: this.params.pulseWidth,
+                pulseCount: this.params.pulseCount,
+                pulseIntensity: this.params.pulseIntensity,
+            }),
+            uRimRadius: uniform(this.params.rimRadius),
+            uRimIntensity: uniform(this.params.rimIntensity),
+            uInterior: uniform(this.params.interior),
+            uAmbient: uniform(this.params.ambient),
 
-                uBackRadius: { value: this.params.backRadius },
-                uBackIntensity: { value: this.params.backIntensity },
-                uBackBase: { value: this.params.backBase },
-                uBackAudio: { value: this.params.backAudio },
+            uBackRadius: uniform(this.params.backRadius),
+            uBackIntensity: uniform(this.params.backIntensity),
+            uBackBase: uniform(this.params.backBase),
+            uBackAudio: uniform(this.params.backAudio),
 
-                uPulseOn: { value: this.params.pulseOn ? 1 : 0 },
-                uPulseWidth: { value: this.params.pulseWidth },
-                uPulseCount: { value: this.params.pulseCount },
-                uPulseIntensity: { value: this.params.pulseIntensity },
+            uVolume: uniform(0),
+            uOpacity: uniform(this.params.opacity),
+        }
 
-                uMouseU: { value: this.mouseU },
-                uEdgeAudio: { value: this.edgeAudio },
+        const logoEval = createLogoEval(u as any)
+        const vLogoP = varying(positionGeometry.xy)
 
-                uVolume: { value: 0 },
-                uOpacity: { value: this.params.opacity },
-            },
-            transparent: true,
-            depthWrite: false,
-            side: THREE.DoubleSide,
-            vertexShader: /* glsl */`
-                varying vec2 vLogoP;
-                void main() {
-                    vLogoP = position.xy;
-                    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-                }
-            `,
-            fragmentShader: /* glsl */`
-                uniform float uAA;
+        const fragment = Fn(() => {
+            const r = logoEval(vLogoP, 1.0)
+            const sd = r.x
+            const glow = r.y
 
-                uniform vec3 uColor;
-                uniform vec3 uBodyColor;
+            const outside = smoothstep(u.uAA.negate(), u.uAA, sd)
+            const inside = float(1.0).sub(outside)
 
-                uniform float uLedIntensity;
-                uniform float uRimRadius;
-                uniform float uRimIntensity;
-                uniform float uInterior;
-                uniform float uAmbient;
+            // Light escaping from behind the slab, same as LogoLedScene.
+            const back = exp(max(sd, 0.0).negate().div(max(u.uBackRadius, 1e-3)))
+                .mul(u.uBackIntensity)
+                .mul(u.uBackBase.add(u.uVolume.mul(u.uBackAudio)))
+            const light = u.uColor.mul(glow.mul(u.uLedIntensity).add(back))
 
-                uniform float uBackRadius;
-                uniform float uBackIntensity;
-                uniform float uBackBase;
-                uniform float uBackAudio;
+            // The slab itself, with a thin rim glow and the buried
+            // seams bleeding faintly through, same as LogoLedScene.
+            const rim = exp(max(sd.negate(), 0.0).negate().div(max(u.uRimRadius, 1e-4)))
+            const body = u.uBodyColor.add(u.uColor.mul(rim).mul(u.uRimIntensity).mul(0.12)).toVar()
+            body.addAssign(u.uColor.mul(glow).mul(u.uLedIntensity).mul(u.uInterior))
+            // Flat baseline lift, independent of edge proximity, so the
+            // slab still reads as a visibly lit opaque surface far from
+            // any edge/LED glow instead of fading into a dark background.
+            body.addAssign(u.uColor.mul(u.uAmbient))
 
-                uniform float uVolume;
-                uniform float uOpacity;
+            const col = mix(light, body, inside)
 
-                varying vec2 vLogoP;
+            // Opaque over the slab; outside it, alpha follows how
+            // bright the escaping/edge light is so the halo bleeds
+            // out onto whatever sits behind this plane instead of
+            // being a hard-edged quad.
+            const haloAlpha = clamp(max(max(light.r, light.g), light.b) as any, 0.0, 1.0)
+            const alpha = clamp(inside.add(float(1.0).sub(inside).mul(haloAlpha)), 0.0, 1.0).mul(u.uOpacity)
 
-                ${LOGO_LED_GLSL}
-
-                void main() {
-                    vec2 p = vLogoP;
-                    vec2 r = logoEval(p, 1.0);
-                    float sd = r.x;
-                    float glow = r.y;
-
-                    float outside = smoothstep(-uAA, uAA, sd);
-                    float inside = 1.0 - outside;
-
-                    // Light escaping from behind the slab, same as LogoLedScene.
-                    float back = exp(-max(sd, 0.0) / max(uBackRadius, 1e-3))
-                        * uBackIntensity * (uBackBase + uVolume * uBackAudio);
-                    vec3 light = uColor * (glow * uLedIntensity + back);
-
-                    // The slab itself, with a thin rim glow and the buried
-                    // seams bleeding faintly through, same as LogoLedScene.
-                    float rim = exp(-max(-sd, 0.0) / max(uRimRadius, 1e-4));
-                    vec3 body = uBodyColor + uColor * rim * uRimIntensity * 0.12;
-                    body += uColor * glow * uLedIntensity * uInterior;
-                    // Flat baseline lift, independent of edge proximity, so the
-                    // slab still reads as a visibly lit opaque surface far from
-                    // any edge/LED glow instead of fading into a dark background.
-                    body += uColor * uAmbient;
-
-                    vec3 col = mix(light, body, inside);
-
-                    // Opaque over the slab; outside it, alpha follows how
-                    // bright the escaping/edge light is so the halo bleeds
-                    // out onto whatever sits behind this plane instead of
-                    // being a hard-edged quad.
-                    float haloAlpha = clamp(max(max(light.r, light.g), light.b), 0.0, 1.0);
-                    float alpha = clamp(inside + (1.0 - inside) * haloAlpha, 0.0, 1.0) * uOpacity;
-
-                    gl_FragColor = vec4(max(col, 0.0), alpha);
-                    #include <tonemapping_fragment>
-                    #include <colorspace_fragment>
-                }
-            `,
+            return vec4(max(col, 0.0), alpha)
         })
+
+        this.planeMat = new NodeMaterial()
+        this.planeMat.transparent = true
+        this.planeMat.depthWrite = false
+        this.planeMat.side = THREE.DoubleSide
+        this.planeMat.fragmentNode = fragment()
     }
 
     createScene() {
@@ -277,7 +253,7 @@ export default class FallingBody extends World {
         const transform = folder.addFolder('transform')
         transform.add(this.params, 'locked').name('Lock Animation (edit position)')
         transform.add(this.params, 'opacity', 0, 1, 0.01).name('Opacity').onChange((v: number) => {
-            this.planeMat.uniforms.uOpacity.value = v
+            this.uniforms.uOpacity.value = v
         })
         transform.add(this.params, 'scale', 0.1, 3, 0.01).name('Scale').onChange((v: number) => {
             this.mesh.scale.setScalar(LOGO_DEFAULT_HEIGHT * v)
@@ -297,62 +273,62 @@ export default class FallingBody extends World {
 
         const led = folder.addFolder('led')
         led.addColor(this.params, 'color').name('Light Color').onChange((v: string) => {
-            this.planeMat.uniforms.uColor.value.set(v)
+            this.uniforms.uColor.value.set(v)
         })
         led.addColor(this.params, 'bodyColor').name('Body Color').onChange((v: string) => {
-            this.planeMat.uniforms.uBodyColor.value.set(v)
+            this.uniforms.uBodyColor.value.set(v)
         })
         led.add(this.params, 'ledIntensity', 0, 6, 0.01).name('Intensity').onChange((v: number) => {
-            this.planeMat.uniforms.uLedIntensity.value = v
+            this.uniforms.uLedIntensity.value = v
         })
         led.add(this.params, 'ledWidth', 0.005, 0.4, 0.001).name('Width').onChange((v: number) => {
-            this.planeMat.uniforms.uLedWidth.value = v
+            this.uniforms.uLedWidth.value = v
         })
         led.add(this.params, 'ledCore', 0, 4, 0.01).name('Core').onChange((v: number) => {
-            this.planeMat.uniforms.uLedCore.value = v
+            this.uniforms.uLedCore.value = v
         })
         led.add(this.params, 'ledHalo', 0, 4, 0.01).name('Halo').onChange((v: number) => {
-            this.planeMat.uniforms.uLedHalo.value = v
+            this.uniforms.uLedHalo.value = v
         })
         led.add(this.params, 'rimRadius', 0.001, 0.1, 0.001).name('Front Rim Size').onChange((v: number) => {
-            this.planeMat.uniforms.uRimRadius.value = v
+            this.uniforms.uRimRadius.value = v
         })
         led.add(this.params, 'rimIntensity', 0, 6, 0.01).name('Front Rim').onChange((v: number) => {
-            this.planeMat.uniforms.uRimIntensity.value = v
+            this.uniforms.uRimIntensity.value = v
         })
         led.add(this.params, 'interior', 0, 2, 0.01).name('Inner Seams').onChange((v: number) => {
-            this.planeMat.uniforms.uInterior.value = v
+            this.uniforms.uInterior.value = v
         })
         led.add(this.params, 'ambient', 0, 2, 0.01).name('Ambient (Base Lift)').onChange((v: number) => {
-            this.planeMat.uniforms.uAmbient.value = v
+            this.uniforms.uAmbient.value = v
         })
 
         const hidden = folder.addFolder('hidden light')
         hidden.add(this.params, 'backIntensity', 0, 5, 0.01).name('Intensity').onChange((v: number) => {
-            this.planeMat.uniforms.uBackIntensity.value = v
+            this.uniforms.uBackIntensity.value = v
         })
         hidden.add(this.params, 'backRadius', 0.02, 2, 0.005).name('Radius').onChange((v: number) => {
-            this.planeMat.uniforms.uBackRadius.value = v
+            this.uniforms.uBackRadius.value = v
         })
         hidden.add(this.params, 'backBase', 0, 2, 0.01).name('Base Level').onChange((v: number) => {
-            this.planeMat.uniforms.uBackBase.value = v
+            this.uniforms.uBackBase.value = v
         })
         hidden.add(this.params, 'backAudio', 0, 5, 0.01).name('Audio Amount').onChange((v: number) => {
-            this.planeMat.uniforms.uBackAudio.value = v
+            this.uniforms.uBackAudio.value = v
         })
 
         const pulse = folder.addFolder('pulse (edge chase)')
         pulse.add(this.params, 'pulseOn').name('Comet Enabled').onChange((v: boolean) => {
-            this.planeMat.uniforms.uPulseOn.value = v ? 1 : 0
+            this.uniforms.uPulseOn.value = v ? 1 : 0
         })
         pulse.add(this.params, 'pulseWidth', 0.01, 0.5, 0.005).name('Comet Width').onChange((v: number) => {
-            this.planeMat.uniforms.uPulseWidth.value = v
+            this.uniforms.uPulseWidth.value = v
         })
         pulse.add(this.params, 'pulseCount', 1, 8, 1).name('Comet Count').onChange((v: number) => {
-            this.planeMat.uniforms.uPulseCount.value = v
+            this.uniforms.uPulseCount.value = v
         })
         pulse.add(this.params, 'pulseIntensity', 0, 10, 0.05).name('Comet Intensity').onChange((v: number) => {
-            this.planeMat.uniforms.uPulseIntensity.value = v
+            this.uniforms.uPulseIntensity.value = v
         })
 
         const audioFolder = folder.addFolder('audio reactive')
@@ -431,7 +407,7 @@ export default class FallingBody extends World {
         const pulseU = ((this.chaseAngle / loop) % 1 + 1) % 1
         this.mouseU.fill(pulseU)
 
-        this.planeMat.uniforms.uVolume.value = this.smoothVolume
+        this.uniforms.uVolume.value = this.smoothVolume
     }
 
     leave() {

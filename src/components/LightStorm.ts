@@ -1,64 +1,13 @@
 
 import Experience from "../Experience"
-import * as THREE from "three"
+import * as THREE from 'three/webgpu'
 import GUI from "lil-gui";
 import World from "../classes/World";
-import simplex3D from "../shaders/simplex3D";
-
-const vertexShader = `
-varying vec3 vWorldPosition;
-varying vec3 vWorldNormal;
-varying vec3 vViewDirection;
-
-void main() {
-    vec4 worldPos = modelMatrix * vec4(position, 1.0);
-    vWorldPosition = worldPos.xyz;
-    vWorldNormal = normalize(mat3(modelMatrix) * normal);
-    vViewDirection = normalize(cameraPosition - worldPos.xyz);
-    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-}
-`
-
-const fragmentShader = `
-${simplex3D}
-
-uniform float time;
-uniform vec3 baseColor;
-uniform vec3 energyColor;
-uniform float energyIntensity;
-uniform float noiseScale;
-uniform float upSpeed;
-
-varying vec3 vWorldPosition;
-varying vec3 vWorldNormal;
-varying vec3 vViewDirection;
-
-void main() {
-    vec3 pos = vWorldPosition * noiseScale;
-
-    // Three noise layers at different scales/speeds for complex electricity
-    float n1 = snoise(pos + vec3(0.0, -time * upSpeed, 0.0));
-    float n2 = snoise(pos * 2.1 + vec3(time * 0.4, -time * upSpeed * 0.6, time * 0.3));
-    float n3 = snoise(pos * 4.3 - vec3(0.0, time * upSpeed * 1.4, 0.0));
-
-    // Sharp bolt (high exponent = narrow bright veins)
-    float bolt = pow(clamp(n1 * 0.5 + 0.5, 0.0, 1.0), 6.0);
-    float fine = pow(clamp(n3 * 0.5 + 0.5, 0.0, 1.0), 4.0);
-    float ambient = clamp(n2 * 0.5 + 0.5, 0.0, 1.0);
-
-    // Fresnel edge glow
-    float fresnel = pow(1.0 - abs(dot(vViewDirection, vWorldNormal)), 2.5);
-
-    float energy = bolt * 1.5 + fresnel * 0.6 + fine * 0.4 + ambient * 0.15;
-    energy *= energyIntensity;
-
-    vec3 col = mix(baseColor, energyColor, clamp(energy, 0.0, 1.0));
-    // Overbright core on bolt areas for bloom pickup
-    col += energyColor * bolt * energyIntensity * 1.5;
-
-    gl_FragColor = vec4(col, 1.0);
-}
-`
+import {
+    Fn, uniform, varying, positionLocal, normalLocal, modelWorldMatrix, cameraPosition,
+    transformDirection, float, vec3, vec4, normalize, dot, abs, pow, clamp, mix, add,
+} from 'three/tsl'
+import { snoise3 } from "../tsl/noise"
 
 export default class LightStorm extends World {
 
@@ -67,7 +16,8 @@ export default class LightStorm extends World {
     private gui: GUI
 
     private gltf!: any
-    private mat!: THREE.ShaderMaterial
+    private mat!: THREE.NodeMaterial
+    private uniforms!: Record<string, any>
 
     private holder: THREE.Object3D
     private guiFolder!: GUI
@@ -100,18 +50,51 @@ export default class LightStorm extends World {
     }
 
     createMaterial() {
-        this.mat = new THREE.ShaderMaterial({
-            vertexShader,
-            fragmentShader,
-            uniforms: {
-                time: { value: 0 },
-                baseColor: { value: new THREE.Color(this.params.baseColor) },
-                energyColor: { value: new THREE.Color(this.params.energyColor) },
-                energyIntensity: { value: this.params.energyIntensity },
-                noiseScale: { value: this.params.noiseScale },
-                upSpeed: { value: this.params.upSpeed },
-            }
+        const u = this.uniforms = {
+            time: uniform(0),
+            baseColor: uniform(new THREE.Color(this.params.baseColor)),
+            energyColor: uniform(new THREE.Color(this.params.energyColor)),
+            energyIntensity: uniform(this.params.energyIntensity),
+            noiseScale: uniform(this.params.noiseScale),
+            upSpeed: uniform(this.params.upSpeed),
+        }
+
+        // ---- vertex ----
+        const worldPos = modelWorldMatrix.mul(vec4(positionLocal, 1.0)).xyz
+        const vWorldPosition = varying(worldPos)
+        const vWorldNormal = varying(transformDirection(normalLocal, modelWorldMatrix))
+        const vViewDirection = varying(normalize(cameraPosition.sub(worldPos)))
+
+        // ---- fragment ----
+        const fragment = Fn(() => {
+            const pos = vWorldPosition.mul(u.noiseScale)
+            const t = u.time
+
+            // Three noise layers at different scales/speeds for complex electricity
+            const n1 = snoise3(pos.add(vec3(0.0, t.mul(u.upSpeed).negate(), 0.0)))
+            const n2 = snoise3(pos.mul(2.1).add(vec3(t.mul(0.4), t.mul(u.upSpeed).mul(0.6).negate(), t.mul(0.3))))
+            const n3 = snoise3(pos.mul(4.3).sub(vec3(0.0, t.mul(u.upSpeed).mul(1.4), 0.0)))
+
+            // Sharp bolt (high exponent = narrow bright veins)
+            const bolt = pow(clamp(n1.mul(0.5).add(0.5), 0.0, 1.0), 6.0)
+            const fine = pow(clamp(n3.mul(0.5).add(0.5), 0.0, 1.0), 4.0)
+            const ambient = clamp(n2.mul(0.5).add(0.5), 0.0, 1.0)
+
+            // Fresnel edge glow
+            const fresnel = pow(float(1.0).sub(abs(dot(vViewDirection, vWorldNormal))), 2.5)
+
+            const energy = add(bolt.mul(1.5), fresnel.mul(0.6), fine.mul(0.4), ambient.mul(0.15))
+                .mul(u.energyIntensity)
+
+            const col = mix(u.baseColor, u.energyColor, clamp(energy, 0.0, 1.0)).toVar()
+            // Overbright core on bolt areas for bloom pickup
+            col.addAssign(u.energyColor.mul(bolt).mul(u.energyIntensity).mul(1.5))
+
+            return vec4(col, 1.0)
         })
+
+        this.mat = new THREE.NodeMaterial()
+        this.mat.fragmentNode = fragment()
     }
 
     createScene() {
@@ -132,7 +115,7 @@ export default class LightStorm extends World {
     private setupGUI() {
         this.guiFolder = this.gui.addFolder('light_storm')
         const folder = this.guiFolder
-        const u = this.mat.uniforms
+        const u = this.uniforms
 
         folder.addColor(this.params, 'baseColor')
             .name('Base Color')
@@ -172,12 +155,12 @@ export default class LightStorm extends World {
     }
 
     update() {
-        this.mat.uniforms.time.value += this.exp.time.delta * 0.001
+        this.uniforms.time.value += this.exp.time.delta * 0.001
 
         if (Date.now() - this.beatDownSpeed < 300) {
-            this.mat.uniforms.energyIntensity.value = 4
+            this.uniforms.energyIntensity.value = 4
         } else {
-            this.mat.uniforms.energyIntensity.value = 0
+            this.uniforms.energyIntensity.value = 0
         }
     }
 

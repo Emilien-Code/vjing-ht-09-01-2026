@@ -1,4 +1,4 @@
-import * as THREE from "three"
+import * as THREE from 'three/webgpu'
 
 // Same HT logo outline as LogoLedScene (three SVG polygons, no curves), but
 // built here as solid extruded 3D geometry so it can stand in for the

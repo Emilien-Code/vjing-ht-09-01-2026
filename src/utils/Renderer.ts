@@ -1,25 +1,17 @@
-import * as THREE from "three";
+import * as THREE from 'three/webgpu';
+import {
+    pass, uniform, uv, renderOutput,
+    Fn, If, float, vec2, vec3, vec4, length, sqrt,
+} from 'three/tsl';
 import Experience from "../Experience"
 import { ThreePerf } from "three-perf"
 
-import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
-import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
-import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
-import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
-import { SobelOperatorShader } from 'three/addons/shaders/SobelOperatorShader.js';
-import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import SelectiveBloom from "./SelectiveBloom";
-import { ColorCorrectionShader } from 'three/examples/jsm/shaders/ColorCorrectionShader.js';
-import { RGBShiftShader } from 'three/examples/jsm/shaders/RGBShiftShader.js';
+import { AsciiPass } from "./AsciiPass";
+import { smoothstepAny } from "../tsl/noise";
 
 
 import GUI from "lil-gui"
-import {
-    godRaysBloom,
-    jellyFishBloom,
-    rendererPalette
-} from "../common/colors"
-
 export interface PostProcessingPreset {
     sobel: boolean
     ascii: boolean
@@ -33,68 +25,6 @@ export interface PostProcessingPreset {
 
 const lerp = (t, i, e) => t * (1 - e) + i * e
 
-
-
-const vignettShaderProperties = {
-
-    uniforms: {
-
-        "tDiffuse": { type: "t", value: null },
-
-        "resolution": { type: "v2", value: new THREE.Vector2(window.innerWidth, window.innerHeight) },
-        "gain": { type: "f", value: 0.9 },
-
-        "horizontal": { type: "bool", value: false },
-        "radius": { type: "f", value: 0.75 },
-        "softness": { type: "f", value: 0.3 },
-
-
-    },
-
-    vertexShader: /*glsl*/`
-
-        varying vec2 vUv;
-
-        void main() {
-
-            vUv = uv;
-            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-
-        }
-
-    `,
-
-    fragmentShader: [
-        "uniform sampler2D tDiffuse;",
-        "uniform vec2 resolution;",
-        "uniform float gain;",
-        "uniform float radius;",
-        "uniform float softness;",
-        "uniform bool horizontal;",
-
-        "varying vec2 vUv;",
-
-        "float rand(vec2 co){",
-        "return fract(sin(dot(co.xy ,vec2(12.9898,78.233))) * 43758.5453);",
-        "}",
-
-        "void main() {",
-        "vec4 color = texture2D( tDiffuse, vUv );",
-        "vec3 c = color.rgb;",
-        "float noise = rand(gl_FragCoord.xy) * .05;",
-
-        // determine center
-        "vec2 position;",
-        "position = (vUv.xy) - vec2(0.5);",
-        "float len = length(position) * gain;",
-        "gl_FragColor = vec4 ( c * vec3 (smoothstep(radius, radius - softness, len)), 1.0);",
-        "}"
-    ].join("\n")
-
-};
-
-import { ClearPass } from "three/examples/jsm/Addons.js";
-import { AsciiPass } from "./AsciiPass";
 import type TwoerScene from "../worlds/TowerScene";
 
 export default class Renderer {
@@ -102,32 +32,32 @@ export default class Renderer {
     public sizes: { width: number; height: number };
     public scene: THREE.Scene;
     public camera: { instance: THREE.Camera };
-    public instance!: THREE.WebGLRenderer;
-    private cursorTexture: THREE.WebGLRenderTarget
-    private sceneTexture: THREE.WebGLRenderTarget
-    private orthographicCamera: THREE.OrthographicCamera;
-    private composer: EffectComposer | null = null;
-    public strength = 0
-    public renderScene: RenderPass
-    public renderScene2: RenderPass
-    private bloomPass: UnrealBloomPass
-    private effectSobel: ShaderPass
-    private selectiveBloom: SelectiveBloom
-    private godRaysBloom: SelectiveBloom
+    public instance!: THREE.WebGPURenderer;
+    // WebGPURenderer needs an async init() before the first render; the
+    // Experience loop waits for this.
+    public initialized = false
+    public ready!: Promise<void>
+    private pipeline!: THREE.RenderPipeline
+    private selectiveBloom!: SelectiveBloom
 
-    private vignetteShader: THREE.ShaderMaterial
-    private asciiPass: AsciiPass
-    private rgbShiftPass: ShaderPass
+    private asciiPass!: AsciiPass
     private perf: ThreePerf | null = null
     private guiFolder!: GUI
 
-    private colorCorrectionpowRGB_x = 2.2
-    private colorCorrectionpowRGB_y = 1.51
-    private colorCorrectionpowRGB_z = 1.0
+    // Per-effect switches and settings. Every stage of the post chain lives in
+    // one shader and is gated by these uniforms, so toggling a glitch preset
+    // never rebuilds a graph or recompiles anything.
+    private uSobel = uniform(0)
+    private uSobelTexel = uniform(new THREE.Vector2(1, 1))
+    private uRgbShift = uniform(0)
+    private uRgbShiftAmount = uniform(0.001)
+    private uRgbShiftAngle = uniform(0)
+    private uVignette = {
+        gain: uniform(1.27),
+        radius: uniform(1.29),
+        softness: uniform(0.39),
+    }
 
-    private colorCorrectionmulRGB_x = 2.1
-    private colorCorrectionmulRGB_y = 1.505
-    private colorCorrectionmulRGB_z = 0.95
     private params = {
         threshold: 0.07,
         strength: 2,
@@ -161,21 +91,12 @@ export default class Renderer {
 
         this.setInstance();
         this.createTweaks()
-
-        if (window.location.hash.includes('dev')) {
-            this.perf = new ThreePerf({
-                anchorX: 'left',
-                anchorY: 'top',
-                domElement: document.body,
-                renderer: this.instance,
-            })
-        }
     }
 
-    public setInstance(strength = 0, r = 0, t = 0): void {
+    public setInstance(): void {
         this.guiFolder = this.experience.helpers.GUI.addFolder('renderer');
 
-        this.instance = new THREE.WebGLRenderer({
+        this.instance = new THREE.WebGPURenderer({
             canvas: this.experience.canvas,
             antialias: true,
         });
@@ -183,77 +104,153 @@ export default class Renderer {
         this.instance.toneMapping = THREE.ACESFilmicToneMapping;
         this.instance.toneMappingExposure = this.params.exposure;
         this.instance.shadowMap.enabled = true;
-        this.instance.shadowMap.type = THREE.PCFSoftShadowMap;
-        // this.instance.setClearColor(rendererPalette[0], 1);
+        this.instance.shadowMap.type = THREE.PCFShadowMap;
         this.instance.setClearColor(0x000000, 1);
         this.instance.setSize(this.sizes.width, this.sizes.height);
         this.instance.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-        this.instance.physicallyCorrectLights = true
 
         this.experience.renderer = this
 
-
-        this.renderScene = new RenderPass(this.experience.scene, this.experience.camera.instance/* null, new THREE.Color( 0xff00ff ), 1**/)
-        this.renderScene2 = new RenderPass(this.experience.scene, this.experience.camera.instance/* null, new THREE.Color( 0xff00ff ), 1**/)
-
         this.selectiveBloom = new SelectiveBloom(this.experience, 3, undefined, this.guiFolder)
-        // this.godRaysBloom = new SelectiveBloom(this.experience, godRaysBloom.layer, {
-        //     strength: 0.3,
-        //     radius: 1.48
-        // })
-
-        // this.bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 1.5, 0.4, 0.85);
-        // this.bloomPass.enabled = this.params.bloom
-        // this.bloomPass.threshold = this.params.threshold;
-        // this.bloomPass.strength = this.params.strength;
-        // this.bloomPass.radius = this.params.radius;
-
-
-        this.composer = new EffectComposer(this.instance);
-
-        // this.composer.addPass(new ClearPass( new THREE.Color( 0xff00ff)))
-        this.composer.addPass(this.renderScene)
-        this.composer.addPass(this.selectiveBloom.getMixPass);
-        this.composer.addPass(this.selectiveBloom.getOutputPass);
-
-        // this.composer.addPass(this.renderScene2)
-        // this.composer.addPass(this.godRaysBloom.getMixPass);
-        // this.composer.addPass(this.godRaysBloom.getOutputPass);
-        // this.composer.addPass(outputPass);
-        console.log('yoyoyo')
-
-
-        //Rendre dans une texture puis retirer les px noirs
-        this.effectSobel = new ShaderPass(SobelOperatorShader);
-        this.effectSobel.enabled = this.params.sobel
-        this.effectSobel.uniforms['resolution'].value.x = window.innerWidth * window.devicePixelRatio;
-        this.effectSobel.uniforms['resolution'].value.y = window.innerHeight * window.devicePixelRatio;
-        this.composer.addPass(this.effectSobel);
-
-        const colorCorrection = new ShaderPass(ColorCorrectionShader);
-        // colorCorrection.uniforms['powRGB'].value = new THREE.Vector3(2.2, 1.51, 1.0);
-        // colorCorrection.uniforms['mulRGB'].value = new THREE.Vector3(2.1, 1.505, 0.95);
-        this.composer.addPass(colorCorrection);
-
         this.asciiPass = new AsciiPass(window.innerWidth, window.innerHeight);
-        this.composer.addPass(this.asciiPass);
+        this.updateSobelTexel()
 
-        this.rgbShiftPass = new ShaderPass(RGBShiftShader);
-        this.rgbShiftPass.uniforms['amount'].value = this.params.rgbShiftAmount;
-        this.rgbShiftPass.uniforms['angle'].value = this.params.rgbShiftAngle;
-        this.rgbShiftPass.enabled = this.params.rgbShift;
-        this.composer.addPass(this.rgbShiftPass);
+        this.pipeline = new THREE.RenderPipeline(this.instance);
+        this.buildPipeline()
 
-        this.vignetteShader = new THREE.ShaderMaterial(vignettShaderProperties)
+        this.ready = this.instance.init().then(() => {
+            this.initialized = true
+            this.selectiveBloom.onResize()
 
-        this.vignetteShader.uniforms["resolution"].value = new THREE.Vector2(window.innerWidth, window.innerHeight);
-        this.vignetteShader.uniforms["horizontal"].value = false; // default is false
-        this.vignetteShader.uniforms["radius"].value = 1.29; // default is 0.75
-        this.vignetteShader.uniforms["softness"].value = 0.39; // default is 0.3
-        this.vignetteShader.uniforms["gain"].value = 1.27; // default is 0.9
+            if (window.location.hash.includes('dev')) {
+                try {
+                    this.perf = new ThreePerf({
+                        anchorX: 'left',
+                        anchorY: 'top',
+                        domElement: document.body,
+                        renderer: this.instance as any,
+                    })
+                } catch (e) {
+                    // three-perf only knows how to read WebGL timer queries.
+                    console.warn('three-perf is unavailable with WebGPURenderer', e)
+                }
+            }
+        })
+    }
 
-        this.composer.addPass(new ShaderPass(this.vignetteShader));
+    // The whole post chain as one node graph. Each stage is a function of
+    // `uv` (instead of a pass with its own render target) so neighbours /
+    // cell centres can be sampled straight from the scene textures:
+    //
+    //   scene + dark/bloom render -> ACES + sRGB (was OutputPass)
+    //     -> sobel -> colour correction -> ascii -> rgb shift -> vignette
+    //
+    // All stage maths below is written in "uv-up" space (v = 0 at the bottom,
+    // like the old WebGL pipeline), so shift directions, the ascii grid origin
+    // and glyph orientation are unchanged. The pipeline's own uv() is v-down
+    // (top-left origin) on both backends, so it is flipped once, in `base`,
+    // right where the textures are sampled.
+    //
+    // Every stage that branches on its enable-uniform first pins its `uv` into
+    // a variable (`.toVar()`). TSL emits a shared expression at its first use;
+    // if that use is inside one branch of an If, the other branch would read a
+    // variable that was never assigned (samples at uv 0,0 -> black).
+    private buildPipeline() {
+        // The old EffectComposer rendered into non-MSAA targets, keep that look.
+        const scenePass = pass(this.experience.scene, this.experience.camera.instance, { samples: 0 })
+        const sceneTexture = scenePass.getTextureNode()
+        const bloom = this.selectiveBloom
 
+        // Scene + (dark render, plus its glow when the bloom is on), tone
+        // mapped and encoded for the screen.
+        const base = Fn(([uvUp]: any[]) => {
+            const uvN = vec2(uvUp.x, float(1.0).sub(uvUp.y))
+            const sum = sceneTexture.sample(uvN).rgb
+                .add(bloom.darkTexture.sample(uvN).rgb)
+            const withGlow = sum.add(bloom.glowTexture.sample(uvN).rgb.mul(bloom.glowAmount))
+            return renderOutput(vec4(withGlow, 1.0), THREE.ACESFilmicToneMapping, THREE.SRGBColorSpace)
+        })
+
+        // Sobel edge detection on the red channel.
+        const sobelEdges = Fn(([uvN]: any[]) => {
+            const t = this.uSobelTexel
+            const s = (dx: number, dy: number) => base(uvN.add(t.mul(vec2(dx, dy)))).r
+
+            const tx0y0 = s(-1, -1), tx0y1 = s(-1, 0), tx0y2 = s(-1, 1)
+            const tx1y0 = s(0, -1), tx1y2 = s(0, 1)
+            const tx2y0 = s(1, -1), tx2y1 = s(1, 0), tx2y2 = s(1, 1)
+
+            const gx = tx2y0.sub(tx0y0).add(tx2y1.sub(tx0y1).mul(2.0)).add(tx2y2.sub(tx0y2))
+            const gy = tx0y2.sub(tx0y0).add(tx1y2.sub(tx1y0).mul(2.0)).add(tx2y2.sub(tx2y0))
+            const g = sqrt(gx.mul(gx).add(gy.mul(gy)))
+            return vec4(vec3(g), 1.0)
+        })
+
+        const stageSobel = Fn(([uvIn]: any[]) => {
+            const uvN = uvIn.toVar()
+            const result = vec4(0.0).toVar()
+            If(this.uSobel.greaterThan(0.5), () => {
+                result.assign(sobelEdges(uvN))
+            }).Else(() => {
+                result.assign(base(uvN))
+            })
+            return result
+        })
+
+        // ColorCorrectionShader at its defaults (powRGB = 2, mulRGB = 1,
+        // addRGB = 0), always on: squares every channel.
+        const stageColor = Fn(([uvN]: any[]) => {
+            const c = stageSobel(uvN)
+            return vec4(c.rgb.mul(c.rgb), c.a)
+        })
+
+        const stageAscii = this.asciiPass.apply((uvN: any) => stageColor(uvN))
+
+        const stageRgbShift = Fn(([uvIn]: any[]) => {
+            const uvN = uvIn.toVar()
+            const result = vec4(0.0).toVar()
+            If(this.uRgbShift.greaterThan(0.5), () => {
+                const offset = vec2(this.uRgbShiftAngle.cos(), this.uRgbShiftAngle.sin()).mul(this.uRgbShiftAmount)
+                const cr = stageAscii(uvN.add(offset))
+                const cga = stageAscii(uvN)
+                const cb = stageAscii(uvN.sub(offset))
+                result.assign(vec4(cr.r, cga.g, cb.b, cga.a))
+            }).Else(() => {
+                result.assign(stageAscii(uvN))
+            })
+            return result
+        })
+
+        const vignette = Fn(() => {
+            const vUv = uv()
+            const c = stageRgbShift(vec2(vUv.x, float(1.0).sub(vUv.y))).rgb
+            const len = length(vUv.sub(0.5)).mul(this.uVignette.gain)
+            return vec4(
+                c.mul(smoothstepAny(this.uVignette.radius, this.uVignette.radius.sub(this.uVignette.softness), len)),
+                1.0,
+            )
+        })
+
+        // Tone mapping and the sRGB encode already happen inside `base`, so
+        // the pipeline must not add its own on top.
+        this.pipeline.outputColorTransform = false
+        this.pipeline.outputNode = vignette()
+    }
+
+    private updateSobelTexel() {
+        const pr = Math.min(window.devicePixelRatio, 2)
+        this.uSobelTexel.value.set(
+            1 / (this.sizes.width * pr),
+            1 / (this.sizes.height * pr),
+        )
+    }
+
+    private setSobel(v: boolean) {
+        this.uSobel.value = v ? 1 : 0
+    }
+
+    private setRgbShift(v: boolean) {
+        this.uRgbShift.value = v ? 1 : 0
     }
 
     createTweaks() {
@@ -267,16 +264,16 @@ export default class Renderer {
         // — Sobel
         const sobelFolder = folder.addFolder('sobel');
         sobelFolder.add(this.params, 'sobel').name('enabled')
-            .onChange((value: boolean) => { this.effectSobel.enabled = value; });
+            .onChange((value: boolean) => { this.setSobel(value); });
 
         // — Vignette
         const vignetteFolder = folder.addFolder('vignette');
         vignetteFolder.add(this.params, 'gain', 0, 2).step(0.01).name('gain')
-            .onChange((value: number) => { this.vignetteShader.uniforms.gain.value = value; });
+            .onChange((value: number) => { this.uVignette.gain.value = value; });
         vignetteFolder.add(this.params, 'vRadius', 0, 2).step(0.01).name('radius')
-            .onChange((value: number) => { this.vignetteShader.uniforms.radius.value = value; });
+            .onChange((value: number) => { this.uVignette.radius.value = value; });
         vignetteFolder.add(this.params, 'softness', 0, 2).step(0.01).name('softness')
-            .onChange((value: number) => { this.vignetteShader.uniforms.softness.value = value; });
+            .onChange((value: number) => { this.uVignette.softness.value = value; });
 
         // — ASCII
         const asciiFolder = folder.addFolder('ascii');
@@ -288,17 +285,17 @@ export default class Renderer {
         // — RGB shift
         const rgbFolder = folder.addFolder('rgb shift');
         rgbFolder.add(this.params, 'rgbShift').name('enabled')
-            .onChange((value: boolean) => { this.rgbShiftPass.enabled = value; });
+            .onChange((value: boolean) => { this.setRgbShift(value); });
         rgbFolder.add(this.params, 'rgbShiftAmount', 0.0, 0.05).step(0.001).name('amount')
-            .onChange((value: number) => { this.rgbShiftPass.uniforms['amount'].value = value; });
+            .onChange((value: number) => { this.uRgbShiftAmount.value = value; });
         rgbFolder.add(this.params, 'rgbShiftAngle', 0.0, Math.PI * 2).step(0.01).name('angle')
-            .onChange((value: number) => { this.rgbShiftPass.uniforms['angle'].value = value; });
+            .onChange((value: number) => { this.uRgbShiftAngle.value = value; });
     }
 
 
     public update(): void {
-        // console.log(this.instance.toneMappingExposure)
-        //  console.log(this.experience.time.elapsedTime)
+        if (!this.initialized) return
+
         if (
             this.experience.world
             && (this.experience.world as TwoerScene).isPlaying
@@ -308,43 +305,14 @@ export default class Renderer {
         }
         this.instance.toneMappingExposure = lerp(this.instance.toneMappingExposure, this.params.exposure, 0.01);
         this.perf?.begin()
-        if (this.composer) {
-            this.composer.render();
-            this.selectiveBloom.update()
-            // this.godRaysBloom.update()
-            this.perf?.end()
-            return
-        }
-
-        this.instance.clear()
-        this.instance.render(this.experience.scene, this.camera.instance);
+        this.selectiveBloom.update()
+        this.pipeline.render();
         this.perf?.end()
-
-
-
-        // this.instance.setRenderTarget(this.cursorTexture)
-        // this.instance.render(this.experience.cursorScene, this.orthographicCamera);
-        // (this.experience.renderMesh.material as THREE.ShaderMaterial).uniforms.uDisplacement.value = this.cursorTexture.texture
-
-        // this.instance.setRenderTarget(this.sceneTexture)
-
-
-        // (this.experience.renderMesh.material as THREE.ShaderMaterial).uniforms.uScene.value = this.sceneTexture.texture
-
-        // this.instance.setRenderTarget(null)
-        // this.instance.clear()
-        // this.instance.render(this.experience.renderScene,  this.orthographicCamera);
-        // this.bloomComposer.render()
-
-        // this.composer.render(this.scene, this.camera.instance)
-        // this.instance.render()
-
-
     }
 
     public applyPostProcessingPreset(preset: PostProcessingPreset): void {
         this.params.sobel = preset.sobel
-        this.effectSobel.enabled = preset.sobel
+        this.setSobel(preset.sobel)
 
         this.params.ascii = preset.ascii
         this.asciiPass.enabled = preset.ascii
@@ -354,14 +322,14 @@ export default class Renderer {
         }
 
         this.params.rgbShift = preset.rgbShift
-        this.rgbShiftPass.enabled = preset.rgbShift
+        this.setRgbShift(preset.rgbShift)
         if (preset.rgbShiftAmount !== undefined) {
             this.params.rgbShiftAmount = preset.rgbShiftAmount
-            this.rgbShiftPass.uniforms['amount'].value = preset.rgbShiftAmount
+            this.uRgbShiftAmount.value = preset.rgbShiftAmount
         }
         if (preset.rgbShiftAngle !== undefined) {
             this.params.rgbShiftAngle = preset.rgbShiftAngle
-            this.rgbShiftPass.uniforms['angle'].value = preset.rgbShiftAngle
+            this.uRgbShiftAngle.value = preset.rgbShiftAngle
         }
 
 
@@ -375,7 +343,8 @@ export default class Renderer {
     public resize(): void {
         this.instance.setSize(this.experience.sizes.width, this.experience.sizes.height);
         this.instance.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-        this.composer && this.composer.setSize(this.experience.sizes.width, this.experience.sizes.height);
         this.asciiPass && this.asciiPass.setSize(this.experience.sizes.width, this.experience.sizes.height);
+        this.updateSobelTexel()
+        this.initialized && this.selectiveBloom.onResize()
     }
 }
