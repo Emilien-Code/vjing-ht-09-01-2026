@@ -121,10 +121,11 @@ const INTERMEDIATE_DURATION_RANGE: [number, number] = [6, 10]
 const TRANSITION_BEAT_TRAVEL_RANGE: [number, number] = [6, 12]
 
 type LongEntry = { name: 'squaresFalling' | 'logoLed', direction?: boolean, weight: number, durationRange: [number, number] }
-// logoLed vs squaresFalling: 3/4 vs 1/4 chance (weight 6 vs 1+1).
+// logo (LED 2/3, holographic 1/3) vs squaresFalling: 6/7 vs 1/7 chance
+// (weight 6 vs 0.5+0.5).
 const LONG_ENTRIES: LongEntry[] = [
-    { name: 'squaresFalling', direction: true, weight: 1, durationRange: LONG_DURATION_RANGE },
-    { name: 'squaresFalling', direction: false, weight: 1, durationRange: LONG_DURATION_RANGE },
+    { name: 'squaresFalling', direction: true, weight: 0.5, durationRange: LONG_DURATION_RANGE },
+    { name: 'squaresFalling', direction: false, weight: 0.5, durationRange: LONG_DURATION_RANGE },
     { name: 'logoLed', weight: 6, durationRange: LOGO_LED_DURATION_RANGE },
 ]
 
@@ -147,6 +148,14 @@ function weightedPick<T extends { weight: number }>(entries: T[]): T {
         r -= entry.weight
     }
     return entries[entries.length - 1]
+}
+
+// The logo slot plays the LED logo 2/3 of the time, the holographic logo 1/3.
+// Resolved at switch time so the anti-repeat key stays 'logoLed' for both
+// variants (no logo -> logo back to back).
+function resolveLogoVariant(name: MainPick['name']): SceneName {
+    if (name === 'logoLed' && Math.random() < 1 / 3) return 'holographicLogo'
+    return name
 }
 
 function pickMainScene(): MainPick {
@@ -344,7 +353,7 @@ export default class GlassScene extends World {
         this.director.phase = 'main'
         this.director.remainingBeats = randomIntInRange(pick.durationRange)
         this.director.lastMainKey = `${pick.name}:${pick.direction ?? ''}`
-        this.switchScene(SCENE_NAMES.indexOf(pick.name), { direction: pick.direction })
+        this.switchScene(SCENE_NAMES.indexOf(resolveLogoVariant(pick.name)), { direction: pick.direction })
     }
 
     onBPMBeat() {
@@ -384,7 +393,7 @@ export default class GlassScene extends World {
         this.director.phase = 'main'
         this.director.lastMainKey = key
         this.director.remainingBeats = randomIntInRange(pick.durationRange)
-        this.switchScene(SCENE_NAMES.indexOf(pick.name), { direction: pick.direction })
+        this.switchScene(SCENE_NAMES.indexOf(resolveLogoVariant(pick.name)), { direction: pick.direction })
     }
 
     update() {

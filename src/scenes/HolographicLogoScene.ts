@@ -2,22 +2,32 @@ import Experience from "../Experience"
 import World from "../classes/World"
 import GUI from "lil-gui"
 import * as THREE from 'three/webgpu'
-import { NodeMaterial } from 'three/webgpu'
 import {
-    Fn, uniform, varying, positionLocal, normalLocal, frontFacing,
-    modelWorldMatrix, modelViewMatrix, cameraViewMatrix, cameraProjectionMatrix,
-    float, vec3, vec4, sin, fract, smoothstep, normalize, dot, max, clamp, mix, pow, select,
+    Fn, uniform, positionWorld, positionGeometry, positionLocal, cameraPosition,
+    modelWorldMatrix, vec2, vec3, vec4, dot, mod, normalize, abs, pow, sin, smoothstep, clamp, mix,
 } from 'three/tsl'
+import { snoise3 } from "../tsl/noise"
 
 // Holographic HT logo — the real ht_logo.glb asset (loaded via
 // Ressources/sources.ts, same pattern as LightStorm's storm_light model)
-// wearing a ported version of the holographic-planet shader: fresnel-driven
-// edge glow, scrolling scanline stripes and a rotating colour gradient. The
-// planet's version sampled an earth texture and a specular/clouds texture to
-// drive its "stroke"/"lights" masks; this project has no such textures for
-// the logo, so those masks are procedural simplex noise sampled in world
-// space instead. The glb mesh also has no UV attribute, which is the other
-// reason the shader avoids vUv entirely.
+// wearing a holographic shader: scrolling world-space stripes, a fresnel
+// glow and a glitchy vertex displacement. The fresnel uses a "radial normal"
+// (direction from the model's bounding-box centre to the fragment) instead of
+// the mesh normals, so the glow reads as a volume around the whole logo
+// rather than following each flat face of the glb.
+//
+// Motion mirrors LogoLedScene: the logo faces the camera head-on with a slow
+// vertical float, plus a slow circular wobble on X and Z. Shape params
+// (scale, offset, float amount) are in LogoLed's screen units (1 = full screen height) and
+// converted to world units at the logo's distance, so both logos frame and
+// move identically when the director swaps one for the other.
+
+// ht_logo.glb's mesh is ~2.7 units tall (LogoLed's logo space is 1 tall).
+const LOGO_WORLD_HEIGHT = 2.7
+
+const random2D = Fn(([value]: [any]) => {
+    return sin(dot(value, vec2(12.9898, 78.233))).mul(43758.5453123).fract()
+})
 
 export default class HolographicLogoScene extends World {
 
@@ -26,8 +36,9 @@ export default class HolographicLogoScene extends World {
     private gui: GUI
 
     private group!: THREE.Group
-    private material!: NodeMaterial
+    private material!: THREE.MeshBasicNodeMaterial
     private uniforms: Record<string, any>
+    private modelBox = new THREE.Box3()
 
     private folder!: GUI
     private visible = false
@@ -37,36 +48,56 @@ export default class HolographicLogoScene extends World {
     // other full-screen scene is running — mirrors LogoLedScene.onToggle.
     public onToggle: ((v: boolean) => void) | null = null
 
-    private smoothVolume = 0
     private punch = 0
+    private smoothVolume = 0
+
 
     public params = {
-        // shape
-        scale: 1,
-        rotationSpeed: 0.12, // revolutions/sec
-        // camera orbit
-        camRadius: 5,
-        camHeight: 0.6,
-        camSpeed: 0.05, // revolutions/sec
-        // colour
-        colorA: '#43144f',
-        colorB: '#6e12c2',
-        // shader look
-        intensity: 2.2,
-        baseBrightness: 0.6,
-        fresnelPower: 1.6,
-        stripeSpeed: 0.4,
-        stripeFrequency: 6.0,
-        noiseScale: 1.4,
-        displaceStrength: 0.125,
-        // hidden light behind the surface, sound-reactive — analog of
-        // LogoLedScene's "hidden light behind the slab".
-        glowBase: 0.4,
-        glowAudio: 1.2,
-        glowKick: 0.8,
+        // shape / motion — same defaults and units as LogoLedScene
+        scale: 0.62,
+        offsetX: 0,
+        offsetY: 0.04,
+        rotation: 0,
+        floatSpeed: 0.25,
+        floatAmount: 0.02,
+        camDistance: 7,
+        // circular wobble: X and Z tilt a quarter-cycle apart
+        circleAmount: 12, // degrees
+        circleSpeed: 0.1, // cycles/sec
+        // vertex glitch
+        glitchStrength: 0.07,
+        glitchThreshold: 0.3,
+        // look
+        color: '#07991a',
+        fresnelPower1: 10,
+        fresnelPower2: 2,
+        stripeFrequency: 20,
+        stripeSpeed: 0.1,
+        // inner veins: flowing noise filling the centre the fresnel leaves empty
+        innerIntensity: 0.6,
+        innerScale: 1.2,
+        innerSpeed: 0.25,    // how fast the pattern morphs in place
+        innerFlowX: 0.15,    // drift direction/speed of the whole pattern
+        innerFlowY: 0.3,
+        innerWarp: 0.8,      // domain warp: 0 = plain noise, higher = smoky/twisted
+        innerWarpScale: 0.5, // size of the warp relative to the veins
+        innerDetail: 0.35,   // second, finer octave mixed in
+        innerSharpness: 2.2, // high = thin electric lines, low = soft fill
+        innerSharpnessLoud: 1.5, // sharpness reached at full volume / on the beat
+        innerThreshold: 0.05,// cuts faint values so the dark gaps stay dark
+        innerContrast: 1,
+        innerStripeMix: 0.5, // how much the scanlines cut through the veins
+        centerFocus: 0.25,   // 0 = even fill everywhere, 1 = only the centre (visible disc)
+        centerFalloff: 0.5,  // softness of that centre mask
+        innerAudio: 1.5,     // extra intensity at full volume / on each beat
+        // audio
         soundReactive: true,
         volumeAttack: 8,
         punchRelease: 6,
+        glitchVolume: 0.25,    // extra glitch amplitude at full volume
+        glitchKick: 0.12,      // extra glitch amplitude on each beat
+        glitchKickSpread: 0.5, // lowers the glitch threshold on each beat so more of the logo breaks up
+        opacityKick: 0.6,      // opacity punch on each beat
     }
 
     constructor(exp: Experience) {
@@ -77,21 +108,33 @@ export default class HolographicLogoScene extends World {
 
         this.uniforms = {
             uTime: uniform(0),
-            uDisplaceStrength: uniform(this.params.displaceStrength),
-
-            uColorA: uniform(new THREE.Color(this.params.colorA)),
-            uColorB: uniform(new THREE.Color(this.params.colorB)),
-
-            uIntensity: uniform(this.params.intensity),
-            uBaseBrightness: uniform(this.params.baseBrightness),
-            uFresnelPower: uniform(this.params.fresnelPower),
-            uStripeSpeed: uniform(this.params.stripeSpeed),
+            uModelCenter: uniform(new THREE.Vector3()),
+            uColor: uniform(new THREE.Color(this.params.color)),
+            uFresnelPower1: uniform(this.params.fresnelPower1),
+            uFresnelPower2: uniform(this.params.fresnelPower2),
             uStripeFrequency: uniform(this.params.stripeFrequency),
-            uNoiseScale: uniform(this.params.noiseScale),
-
-            uGlowBase: uniform(this.params.glowBase),
-            uGlowAudio: uniform(this.params.glowAudio),
-            uGlowKick: uniform(this.params.glowKick),
+            uStripeSpeed: uniform(this.params.stripeSpeed),
+            uGlitchStrength: uniform(this.params.glitchStrength),
+            uGlitchThreshold: uniform(this.params.glitchThreshold),
+            uGlitchVolume: uniform(this.params.glitchVolume),
+            uGlitchKick: uniform(this.params.glitchKick),
+            uGlitchKickSpread: uniform(this.params.glitchKickSpread),
+            uOpacityKick: uniform(this.params.opacityKick),
+            uInnerIntensity: uniform(this.params.innerIntensity),
+            uInnerScale: uniform(this.params.innerScale),
+            uInnerSpeed: uniform(this.params.innerSpeed),
+            uInnerFlow: uniform(new THREE.Vector2(this.params.innerFlowX, this.params.innerFlowY)),
+            uInnerWarp: uniform(this.params.innerWarp),
+            uInnerWarpScale: uniform(this.params.innerWarpScale),
+            uInnerDetail: uniform(this.params.innerDetail),
+            uInnerSharpness: uniform(this.params.innerSharpness),
+            uInnerSharpnessLoud: uniform(this.params.innerSharpnessLoud),
+            uInnerThreshold: uniform(this.params.innerThreshold),
+            uInnerContrast: uniform(this.params.innerContrast),
+            uInnerStripeMix: uniform(this.params.innerStripeMix),
+            uCenterFocus: uniform(this.params.centerFocus),
+            uCenterFalloff: uniform(this.params.centerFalloff),
+            uInnerAudio: uniform(this.params.innerAudio),
             uVolume: uniform(0),
             uPunch: uniform(0),
         }
@@ -105,58 +148,81 @@ export default class HolographicLogoScene extends World {
     private createMaterial() {
         const u = this.uniforms
 
-        const random2D = (v: any) => fract(sin(v.x.mul(12.9898).add(v.y.mul(78.233))).mul(43758.5453123))
+        this.material = new THREE.MeshBasicNodeMaterial()
+        this.material.transparent = true
+        this.material.side = THREE.DoubleSide
 
-        // ---- vertex: audio-independent glitchy displacement in world space ----
-        // (Plain expressions only: .assign() is only legal inside an Fn().)
-        const basePosition: any = modelWorldMatrix.mul(vec4(positionLocal, 1.0))
-
-        const variationTime = u.uTime.sub(basePosition.y)
-        const variationStrength = sin(variationTime)
-            .add(sin(variationTime.mul(3.45)))
-            .add(sin(variationTime.mul(8.76)))
-            .div(3.0)
-        const strength = smoothstep(0.3, 1.0, variationStrength).mul(u.uDisplaceStrength)
-
-        const modelPosition = vec4(
-            basePosition.x.add(random2D(basePosition.xz.mul(u.uTime)).sub(0.5).mul(strength)),
-            basePosition.y,
-            basePosition.z.add(random2D(basePosition.zx.mul(u.uTime)).sub(0.5).mul(strength)),
-            basePosition.w,
+        // ---- fragment: stripes + fresnel ----
+        const stripes = pow(
+            mod(positionWorld.y.add(u.uTime.mul(u.uStripeSpeed).negate()).mul(u.uStripeFrequency), 1),
+            3,
         )
 
-        const mvPosition = modelViewMatrix.mul(vec4(positionLocal, 1.0))
-        const vViewDir = varying(mvPosition.xyz.negate())
-        const vNormal = varying(modelWorldMatrix.mul(vec4(normalLocal, 0.0)).xyz)
+        const radialNormal = normalize(positionWorld.sub(u.uModelCenter))
+        const viewDirection = normalize(cameraPosition.sub(positionWorld))
+        const f = abs(dot(viewDirection, radialNormal)).oneMinus().pow(u.uFresnelPower1)
+        const fresnel = pow(f, u.uFresnelPower2)
+        const holographic = stripes.mul(fresnel).add(fresnel.mul(1.25))
 
-        // ---- fragment ----
-        // The GLSL this replaces first built a planet-style base/rim/scanline/
-        // hidden-light colour (uColorA/B, uIntensity, uStripe*, uGlow*, ...),
-        // but then overwrote gl_FragColor with the fresnel look below, so none
-        // of it ever reached the screen. Only the live path is ported; the
-        // GUI-facing uniforms are kept so the folder still builds.
-        const fragment = Fn(() => {
-            const baseColor = vec3(0.102, 0.114, 0.141)   // 0x1a1d24
-            const fresnelColor = vec3(0.416, 0.831, 1.0)  // 0x6ad4ff
-            const fresnelPower = 2.2
-            const fresnelIntensity = 1.6
-            const baseOpacity = 0.06
-            const lightDir = vec3(0.4, 0.8, 0.6)
+        // Inner veins: ridged, domain-warped simplex noise in the mesh's own
+        // space (so it travels with the logo). Pattern drifts with uInnerFlow
+        // and morphs in place along z with uInnerSpeed.
+        const morph = u.uTime.mul(u.uInnerSpeed)
+        const flow = vec3(u.uInnerFlow.mul(u.uTime), 0)
+        const q = positionGeometry.mul(u.uInnerScale).sub(flow)
+        const warp = snoise3(q.mul(u.uInnerWarpScale).add(vec3(0, 0, morph.mul(0.6))))
+        const wq = q.add(warp.mul(u.uInnerWarp))
+        const n = snoise3(wq.add(vec3(0, 0, morph)))
+            .add(snoise3(wq.mul(2.7).add(vec3(0, 0, morph.mul(1.7)))).mul(u.uInnerDetail))
+            .div(u.uInnerDetail.add(1))
+        // Sound softens the veins: sharpness slides from uInnerSharpness
+        // (quiet) towards uInnerSharpnessLoud (loud / on the beat).
+        const loudness = clamp(u.uVolume.add(u.uPunch.mul(0.5)), 0, 1)
+        const sharpness = mix(u.uInnerSharpness, u.uInnerSharpnessLoud, loudness)
+        const ridged = abs(n).oneMinus().pow(sharpness)
+        const veins = smoothstep(u.uInnerThreshold, 1, ridged).pow(u.uInnerContrast)
 
-            const V = normalize(vViewDir)
-            const N = select(frontFacing, normalize(vNormal), normalize(vNormal).negate())
-            const diff = max(dot(N, normalize(lightDir)), 0.0)
-            const diffuse = baseColor.mul(float(0.35).add(diff.mul(0.65)))
-            const fresnel2 = pow(float(1.0).sub(clamp(dot(N, V), 0.0, 1.0)), fresnelPower)
-            const color = mix(diffuse, fresnelColor, fresnel2)
-            const alpha = clamp(mix(float(baseOpacity), 1.0, fresnel2).mul(fresnelIntensity), 0.0, 1.0)
-            return vec4(color, alpha)
-        })
+        // Optional bias towards the middle, where the fresnel leaves a dark
+        // hole. Kept weak by default: at full strength it reads as a disc.
+        const facing = abs(dot(viewDirection, radialNormal)).pow(u.uCenterFalloff)
+        const centerMask = facing.sub(1).mul(u.uCenterFocus).add(1)
 
-        this.material = new NodeMaterial()
-        this.material.transparent = true
-        this.material.vertexNode = cameraProjectionMatrix.mul(cameraViewMatrix).mul(modelPosition)
-        this.material.fragmentNode = fragment()
+        const stripeMask = stripes.sub(1).mul(u.uInnerStripeMix).add(1)
+        const innerAudio = u.uVolume.add(u.uPunch.mul(0.5)).mul(u.uInnerAudio).add(1)
+        const inner = veins.mul(centerMask).mul(stripeMask).mul(u.uInnerIntensity).mul(innerAudio)
+
+        this.material.colorNode = u.uColor
+        this.material.opacityNode = holographic.add(inner).mul(u.uPunch.mul(u.uOpacityKick).add(1))
+
+        // ---- vertex: glitchy horizontal displacement travelling up the logo ----
+        // Sound-reactive: volume and the beat punch both raise the amplitude,
+        // and the punch also lowers the threshold so a beat spreads the
+        // glitch over more of the logo instead of only the wave's peaks.
+        this.material.positionNode = Fn(() => {
+            const modelPosition = modelWorldMatrix.mul(vec4(positionGeometry, 1)).xyz
+
+            const glitchTime = u.uTime.sub(modelPosition.y)
+            const glitchStrength = sin(glitchTime)
+                .add(sin(glitchTime.mul(2.34)))
+                .add(sin(glitchTime.mul(5.67)))
+                .div(3)
+                .toVar()
+
+            // Only keep the peaks, then scale
+            const threshold = u.uGlitchThreshold.sub(u.uPunch.mul(u.uGlitchKickSpread))
+            const amplitude = u.uGlitchStrength
+                .add(u.uVolume.mul(u.uGlitchVolume))
+                .add(u.uPunch.mul(u.uGlitchKick))
+            glitchStrength.assign(smoothstep(threshold, 1.0, glitchStrength).mul(amplitude))
+
+            const offset = vec3(
+                random2D(modelPosition.xz.add(u.uTime)).sub(0.5),
+                0,
+                random2D(modelPosition.zx.add(u.uTime)).sub(0.5),
+            ).mul(glitchStrength)
+
+            return positionLocal.add(offset)
+        })()
     }
 
     private createMesh() {
@@ -188,49 +254,85 @@ export default class HolographicLogoScene extends World {
             })
 
         const shape = this.folder.addFolder('shape')
-        shape.add(this.params, 'scale', 0.1, 3, 0.01).name('scale')
-            .onChange((v: number) => { this.group.scale.setScalar(v) })
-        shape.add(this.params, 'rotationSpeed', -1, 1, 0.01).name('rotation speed')
-        shape.add(this.params, 'displaceStrength', 0, 0.5, 0.001).name('displace strength')
-            .onChange((v: number) => { u.uDisplaceStrength.value = v })
+        shape.add(this.params, 'scale', 0.1, 2, 0.001).name('scale')
+        shape.add(this.params, 'offsetX', -1, 1, 0.001).name('offset x')
+        shape.add(this.params, 'offsetY', -1, 1, 0.001).name('offset y')
+        shape.add(this.params, 'rotation', -180, 180, 0.1).name('rotation (deg)')
+        shape.add(this.params, 'floatSpeed', 0, 2, 0.01).name('float speed')
+        shape.add(this.params, 'floatAmount', 0, 0.2, 0.001).name('float amount')
+        shape.add(this.params, 'circleAmount', 0, 45, 0.1).name('circle amount (deg)')
+        shape.add(this.params, 'circleSpeed', 0, 1, 0.005).name('circle speed')
+        shape.add(this.params, 'camDistance', 2, 20, 0.1).name('camera distance')
+
         shape.close()
 
-        const camera = this.folder.addFolder('camera')
-        camera.add(this.params, 'camRadius', 1, 15, 0.1).name('orbit radius')
-        camera.add(this.params, 'camHeight', -5, 5, 0.05).name('orbit height')
-        camera.add(this.params, 'camSpeed', -0.3, 0.3, 0.005).name('orbit speed')
-        camera.close()
-
-        const color = this.folder.addFolder('color')
-        color.addColor(this.params, 'colorA').name('color A')
-            .onChange((v: string) => { u.uColorA.value.set(v) })
-        color.addColor(this.params, 'colorB').name('color B')
-            .onChange((v: string) => { u.uColorB.value.set(v) })
-        color.close()
+        const glitch = this.folder.addFolder('vertex glitch')
+        glitch.add(this.params, 'glitchStrength', 0, 1, 0.001).name('base strength')
+            .onChange((v: number) => { u.uGlitchStrength.value = v })
+        glitch.add(this.params, 'glitchThreshold', 0, 0.99, 0.01).name('threshold')
+            .onChange((v: number) => { u.uGlitchThreshold.value = v })
+        glitch.close()
 
         const look = this.folder.addFolder('look')
-        look.add(this.params, 'intensity', 0, 6, 0.01).name('intensity')
-            .onChange((v: number) => { u.uIntensity.value = v })
-        look.add(this.params, 'baseBrightness', 0, 2, 0.01).name('base brightness')
-            .onChange((v: number) => { u.uBaseBrightness.value = v })
-        look.add(this.params, 'fresnelPower', 0.2, 6, 0.01).name('fresnel power')
-            .onChange((v: number) => { u.uFresnelPower.value = v })
+        look.addColor(this.params, 'color').name('color')
+            .onChange((v: string) => { u.uColor.value.set(v) })
+        look.add(this.params, 'fresnelPower1', 0, 20, 0.01).name('fresnel power 1')
+            .onChange((v: number) => { u.uFresnelPower1.value = v })
+        look.add(this.params, 'fresnelPower2', 0, 10, 0.01).name('fresnel power 2')
+            .onChange((v: number) => { u.uFresnelPower2.value = v })
+        look.add(this.params, 'stripeFrequency', 0.5, 60, 0.1).name('stripe frequency')
+            .onChange((v: number) => { u.uStripeFrequency.value = v })
         look.add(this.params, 'stripeSpeed', -2, 2, 0.01).name('stripe speed')
             .onChange((v: number) => { u.uStripeSpeed.value = v })
-        look.add(this.params, 'stripeFrequency', 0.5, 20, 0.1).name('stripe frequency')
-            .onChange((v: number) => { u.uStripeFrequency.value = v })
-        look.add(this.params, 'noiseScale', 0.1, 5, 0.01).name('noise scale')
-            .onChange((v: number) => { u.uNoiseScale.value = v })
         look.close()
 
-        const audio = this.folder.addFolder('hidden light (audio)')
+        const inner = this.folder.addFolder('inner veins')
+        inner.add(this.params, 'innerIntensity', 0, 3, 0.01).name('intensity')
+            .onChange((v: number) => { u.uInnerIntensity.value = v })
+        inner.add(this.params, 'innerScale', 0.1, 6, 0.01).name('scale')
+            .onChange((v: number) => { u.uInnerScale.value = v })
+        inner.add(this.params, 'innerSpeed', 0, 2, 0.01).name('morph speed')
+            .onChange((v: number) => { u.uInnerSpeed.value = v })
+        inner.add(this.params, 'innerFlowX', -2, 2, 0.01).name('flow x')
+            .onChange((v: number) => { u.uInnerFlow.value.x = v })
+        inner.add(this.params, 'innerFlowY', -2, 2, 0.01).name('flow y')
+            .onChange((v: number) => { u.uInnerFlow.value.y = v })
+        inner.add(this.params, 'innerWarp', 0, 3, 0.01).name('warp')
+            .onChange((v: number) => { u.uInnerWarp.value = v })
+        inner.add(this.params, 'innerWarpScale', 0.05, 3, 0.01).name('warp scale')
+            .onChange((v: number) => { u.uInnerWarpScale.value = v })
+        inner.add(this.params, 'innerDetail', 0, 1, 0.01).name('detail')
+            .onChange((v: number) => { u.uInnerDetail.value = v })
+        inner.add(this.params, 'innerSharpness', 1, 30, 0.1).name('sharpness')
+            .onChange((v: number) => { u.uInnerSharpness.value = v })
+        inner.add(this.params, 'innerSharpnessLoud', 1, 30, 0.1).name('sharpness (loud)')
+            .onChange((v: number) => { u.uInnerSharpnessLoud.value = v })
+        inner.add(this.params, 'innerThreshold', 0, 0.95, 0.01).name('threshold')
+            .onChange((v: number) => { u.uInnerThreshold.value = v })
+        inner.add(this.params, 'innerContrast', 0.2, 5, 0.01).name('contrast')
+            .onChange((v: number) => { u.uInnerContrast.value = v })
+        inner.add(this.params, 'innerStripeMix', 0, 1, 0.01).name('stripe mix')
+            .onChange((v: number) => { u.uInnerStripeMix.value = v })
+        inner.add(this.params, 'centerFocus', 0, 1, 0.01).name('center focus')
+            .onChange((v: number) => { u.uCenterFocus.value = v })
+        inner.add(this.params, 'centerFalloff', 0.05, 4, 0.01).name('center falloff')
+            .onChange((v: number) => { u.uCenterFalloff.value = v })
+        inner.add(this.params, 'innerAudio', 0, 5, 0.01).name('audio amount')
+            .onChange((v: number) => { u.uInnerAudio.value = v })
+        inner.close()
+
+        const audio = this.folder.addFolder('audio')
         audio.add(this.params, 'soundReactive').name('sound reactive')
-        audio.add(this.params, 'glowBase', 0, 2, 0.01).name('base level')
-            .onChange((v: number) => { u.uGlowBase.value = v })
-        audio.add(this.params, 'glowAudio', 0, 5, 0.01).name('volume amount')
-            .onChange((v: number) => { u.uGlowAudio.value = v })
-        audio.add(this.params, 'glowKick', 0, 5, 0.01).name('kick punch')
-            .onChange((v: number) => { u.uGlowKick.value = v })
+        audio.add(this.params, 'glitchVolume', 0, 2, 0.01).name('glitch volume')
+            .onChange((v: number) => { u.uGlitchVolume.value = v })
+        audio.add(this.params, 'glitchKick', 0, 2, 0.01).name('glitch kick')
+            .onChange((v: number) => { u.uGlitchKick.value = v })
+        audio.add(this.params, 'glitchKickSpread', 0, 1, 0.01).name('glitch kick spread')
+            .onChange((v: number) => { u.uGlitchKickSpread.value = v })
+        audio.add(this.params, 'opacityKick', 0, 3, 0.01).name('opacity kick')
+            .onChange((v: number) => { u.uOpacityKick.value = v })
+        audio.add(this.params, 'volumeAttack', 0.5, 20, 0.1).name('volume attack')
+        audio.add(this.params, 'punchRelease', 0.5, 20, 0.1).name('punch release')
         audio.close()
 
         this.folder.close()
@@ -246,23 +348,6 @@ export default class HolographicLogoScene extends World {
         this.group.visible = v
     }
 
-    // -----------------------------------------------------------------------
-    // Audio
-    // -----------------------------------------------------------------------
-
-    private updateAudio(dt: number) {
-        const an = this.exp.audioManager
-        const p = this.params
-
-        const volume = p.soundReactive ? (an?.volumeSmooth ?? 0) : 0
-        this.smoothVolume += (volume - this.smoothVolume) * Math.min(1, dt * p.volumeAttack)
-
-        this.punch += (0 - this.punch) * Math.min(1, dt * p.punchRelease)
-
-        this.uniforms.uVolume.value = this.smoothVolume
-        this.uniforms.uPunch.value = this.punch
-    }
-
     onBPMBeat() {
         if (!this.visible || !this.params.soundReactive) return
         this.punch = 1
@@ -275,20 +360,51 @@ export default class HolographicLogoScene extends World {
 
         const dt = Math.min(this.exp.time.delta * 0.001, 0.1)
         const t = this.exp.time.elapsedTime * 0.001
-        const p = this.params
 
-        this.updateAudio(dt)
         this.uniforms.uTime.value = t
 
-        this.group.rotation.y += p.rotationSpeed * dt * Math.PI * 2
+        this.updateAudio(dt)
+        this.updateMotion(t)
+    }
 
-        const angle = t * p.camSpeed * Math.PI * 2
-        this.exp.camera.instance.position.set(
-            Math.sin(angle) * p.camRadius,
-            p.camHeight,
-            Math.cos(angle) * p.camRadius,
+    private updateAudio(dt: number) {
+        const p = this.params
+        const volume = p.soundReactive ? (this.exp.audioManager?.volumeSmooth ?? 0) : 0
+        this.smoothVolume += (volume - this.smoothVolume) * Math.min(1, dt * p.volumeAttack)
+        this.punch += (0 - this.punch) * Math.min(1, dt * p.punchRelease)
+
+        this.uniforms.uVolume.value = this.smoothVolume
+        this.uniforms.uPunch.value = this.punch
+    }
+
+    private updateMotion(t: number) {
+        const p = this.params
+        const camera = this.exp.camera.instance
+
+        // Fixed, head-on camera; the logo does the moving.
+        camera.position.set(0, 0, p.camDistance)
+        camera.lookAt(0, 0, 0)
+
+        // World units per LogoLed screen unit (1 = full screen height) at the
+        // logo's plane.
+        const screenHeight = 2 * p.camDistance * Math.tan(THREE.MathUtils.degToRad(camera.fov) * 0.5)
+
+        this.group.scale.setScalar(p.scale * screenHeight / LOGO_WORLD_HEIGHT)
+        this.group.position.set(
+            p.offsetX * screenHeight,
+            (p.offsetY + Math.sin(t * p.floatSpeed * Math.PI * 2) * p.floatAmount) * screenHeight,
+            0,
         )
-        this.exp.camera.instance.lookAt(this.group.position)
+        const deg = THREE.MathUtils.degToRad
+        const angle = t * p.circleSpeed * Math.PI * 2
+        this.group.rotation.set(
+            deg(Math.sin(angle) * p.circleAmount),
+            0,
+            deg(p.rotation + Math.cos(angle) * p.circleAmount),
+        )
+
+        // Keep the fresnel's radial centre in sync with the moving logo
+        this.modelBox.setFromObject(this.group).getCenter(this.uniforms.uModelCenter.value)
     }
 
     clean() {
